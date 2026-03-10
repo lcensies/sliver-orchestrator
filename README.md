@@ -2,141 +2,118 @@
 
 A service wrapper on top of Sliver's gRPC API that supports building and executing multi-stage attack chains for cyber range training. Chains are directed acyclic graphs (DAGs) of steps, where steps can forward their output to later steps and gate execution on conditions.
 
-**Repo root** = this directory (`scenario/` in the sliver monorepo, or the repo root when standalone). All paths in this README are relative to that root (`lab/`, `examples/`, `atomics/`). When in the sliver monorepo, run Docker and scripts from the `scenario/` directory; have `atomics/` at repo root (e.g. symlink `atomics -> ../atomics` if atomics live at sliver root).
+**Repo root** in this README means the `scenario/` directory. In the Sliver monorepo, run Docker and helper scripts from `scenario/`.
 
 ## Quick Start
 
+### 1. Prepare atomics
+
+The Docker lab mounts atomics from `workspace/atomics`.
+
 ```bash
-# 1. Optional: prefetch extra atomics locally
-chmod +x atomic/fetch.sh && ./atomic/fetch.sh
-
-# 2. Start the lab (Docker — from repo root = scenario/)
-#    If ./atomics is empty, the C2 container fetches the full upstream atomics library automatically.
-docker compose -f lab/docker-compose.yml up --build -d
-
-# --- OR --- run scenario-server locally against an existing Sliver server:
-# Build the binary (requires CGO + gcc + libsqlite3-dev)
-make scenario
-./scenario-server \
-  --config ~/.sliver/configs/myoperator_192.168.56.10.cfg \
-  --atomics ./atomics \
-  --db ./scenario.db \
-  --listen :8080
-
-# 5. Check the API
-curl http://localhost:8080/api/v1/health
-curl http://localhost:8080/api/v1/atomics | jq .
-curl http://localhost:8080/api/v1/sessions | jq .
+mkdir -p workspace/atomics
+chmod +x atomic/fetch.sh
+./atomic/fetch.sh ./workspace/atomics
 ```
 
-## Lab Setup
-
-### Docker (quick, Linux victims only)
+### 2. Start the lab
 
 ```bash
-# 1. Optional: prefetch extra atomics on the host
-./atomic/fetch.sh
-
-# 2. Start the lab — C2 + victim containers (from repo root = scenario/)
-#    scenario-server is compiled inside Docker (multi-stage build).
-docker compose -f lab/docker-compose.yml up --build -d
-# Or:  cd lab && docker compose up --build -d
-
-# Watch logs (victim-1 downloads and runs the beacon automatically):
+docker-compose -f lab/docker-compose.yml up --build -d
 docker-compose logs -f c2
-docker-compose logs -f victim-1
-```
-
-By default the C2 fetches from `redcanaryco/atomic-red-team`. To override the source:
-
-```bash
-export SCENARIO_ATOMICS_REPO_OWNER=my-fork
-export SCENARIO_ATOMICS_REPO_BRANCH=my-branch
-docker compose -f lab/docker-compose.yml up --build -d
 ```
 
 The compose stack exposes:
 - `http://127.0.0.1:18080` — Scenario REST API
-- `127.0.0.1:31337` — Sliver gRPC (for `sliver-client` on your workstation)
+- `127.0.0.1:31337` — Sliver gRPC
 
-#### What happens automatically
+### 3. Run the example chain
 
-1. **C2 container** starts `sliver-server`, generates an operator config, and starts `scenario-server`.
-2. **Victim containers** poll `GET /api/v1/health` until the API is ready, then call `GET /api/v1/implant/linux`.
-3. On first call, `scenario-server` starts a Sliver HTTP listener on port 80 and compiles a Linux beacon (~1–2 min).  The binary is cached; subsequent victims get it instantly.
-4. Each victim runs the beacon in the background.  Once it checks in, `GET /api/v1/sessions` lists the active sessions.
-
-#### Running an atomic test end-to-end
+If you are in the Sliver monorepo root:
 
 ```bash
-# 1. Find the victim session ID
-SESSION=$(curl -s http://127.0.0.1:18080/api/v1/sessions | jq -r '.[0].id')
-
-# 2. Create a minimal chain — e.g. run T1082 (System Information Discovery) on the victim
-CHAIN_ID=$(curl -s -X POST http://127.0.0.1:18080/api/v1/chains \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "id": "quick-demo",
-    "name": "System Discovery Demo",
-    "steps": [
-      {
-        "id": "sysinfo",
-        "name": "System Information Discovery",
-        "action": {
-          "type": "atomic",
-          "atomic_ref": { "id": "T1082", "test": 0 }
-        }
-      }
-    ]
-  }' | jq -r .id)
-
-# 3. Execute the chain on the victim session (async — returns execution_id immediately)
-EXEC_ID=$(curl -s -X POST \
-  "http://127.0.0.1:18080/api/v1/chains/${CHAIN_ID}/execute" \
-  -H 'Content-Type: application/json' \
-  -d "{\"session_id\": \"${SESSION}\"}" | jq -r .execution_id)
-
-# 4. Stream results live
-curl -N "http://127.0.0.1:18080/api/v1/executions/${EXEC_ID}/stream"
+./scenario-runner -chain scenario/examples/linux-full-chain.yaml -graph -online-print
 ```
 
-### Vagrant (full lab with Packer-built offline boxes)
+If `scenario-runner` is in the current directory, use:
 
 ```bash
-# Build base boxes (only needed once; requires ISO files)
+./scenario-runner -chain examples/linux-full-chain.yaml -graph -online-print
+```
+
+If you are inside `scenario/` in the Sliver monorepo, use:
+
+```bash
+../scenario-runner -chain examples/linux-full-chain.yaml -graph -online-print
+```
+
+### 4. Check the API
+
+```bash
+curl http://127.0.0.1:18080/api/v1/health
+curl http://127.0.0.1:18080/api/v1/atomics | jq .
+curl http://127.0.0.1:18080/api/v1/sessions | jq .
+```
+
+## Lab Setup
+
+### Docker
+
+What starts automatically:
+
+1. The `c2` container starts `sliver-server`, generates an operator config, and runs `scenario-server`.
+2. The victim polls `GET /api/v1/health` until the API is ready, then downloads the Linux implant from `GET /api/v1/implant/linux`.
+3. On the first implant request, `scenario-server` starts a Sliver HTTP listener on port `80` and builds a Linux beacon.
+4. When the victim checks in, it appears in `GET /api/v1/sessions`.
+
+Useful commands:
+
+```bash
+docker-compose -f lab/docker-compose.yml up --build -d
+docker-compose logs -f c2
+docker-compose logs -f victim-1
+docker-compose down -v
+```
+
+### Vagrant
+
+```bash
 packer build lab/packer/ubuntu.pkr.hcl
-# Optionally: packer build lab/packer/windows.pkr.hcl
+# Optional:
+packer build lab/packer/windows.pkr.hcl
 
-# Start VMs (from repo root = scenario/)
 cd lab
-vagrant up                   # starts c2-server + victim-linux
-vagrant up victim-windows    # also start Windows victim
-
-# Access
+vagrant up
+vagrant up victim-windows
 vagrant ssh c2-server
 curl http://192.168.56.10:8080/api/v1/health
 ```
 
 ## Atomics Library
 
-Technique definitions live in `atomics/` in [Atomic Red Team](https://github.com/redcanaryco/atomic-red-team) format and directory layout: `atomics/T1059.001/T1059.001.yaml`. The loader also accepts `.yml` files and recursively scans subdirectories under the atomics root. The library ships with 23 hand-crafted techniques covering the full kill chain. In Docker, the C2 container auto-fetches the full Atomic Red Team atomics library on startup when `atomics/` is empty. To pull atomics manually:
+Technique definitions use the [Atomic Red Team](https://github.com/redcanaryco/atomic-red-team) layout: `T1059.001/T1059.001.yaml`. The loader accepts both `.yaml` and `.yml` and scans subdirectories under the atomics root.
+
+For the Docker lab, put atomics in `workspace/atomics`:
 
 ```bash
-./atomic/fetch.sh                     # fetch full atomics library
-./atomic/fetch.sh --clean             # then prune to SELECTED_TECHNIQUES
-./atomic/fetch.sh ./atomics my-fork my-branch
+mkdir -p workspace/atomics
+./atomic/fetch.sh ./workspace/atomics
 ```
 
-The fetcher downloads the upstream GitHub archive and unpacks the `atomics/` tree only. It does not install `Invoke-AtomicRedTeam` or PowerShell helper scripts. With `--clean`, it removes all non-selected top-level technique directories after extraction.
+Optional cleanup after download:
 
-For **local execution** of atomics (on the C2 host, without a Sliver agent), use [GoART](https://github.com/lcensies/go-atomicredteam):
+```bash
+./atomic/fetch.sh ./workspace/atomics --clean
+```
+
+`atomic/fetch.sh` downloads the GitHub archive and copies only the upstream `atomics/` tree. It does not install `Invoke-AtomicRedTeam` or PowerShell helper scripts.
+
+For local execution on the C2 host, you can use [GoART](https://github.com/lcensies/go-atomicredteam):
 
 ```bash
 go install github.com/lcensies/go-atomicredteam/cmd/goart@latest
-goart --technique T1059.001 --index 0 --atomics-path ./atomics
+goart --technique T1059.001 --index 0 --atomics-path ./workspace/atomics
 ```
-
-The scenario server uses the same YAML files; GoART and the scenario server can share the same `atomics/` directory.
 
 ## Chain YAML Schema
 
@@ -555,14 +532,14 @@ Repo root = this directory (scenario/ in sliver monorepo, or the repo root when 
 ├── cmd/server/      HTTP server entrypoint (main.go)
 ├── config/          Config loading (YAML + env)
 ├── chain/           Chain model, DAG resolver, condition evaluator, executor
-├── atomic/          Atomic Red Team–compatible YAML library
+├── atomic/          Fetch helper for upstream Atomic Red Team YAMLs
+│   └── fetch.sh     Downloads upstream atomics into a local directory
 ├── sliver/          Sliver gRPC client + step executor
 ├── store/           SQLite persistence (GORM)
 └── api/             REST API handlers (Go 1.22 ServeMux)
 
-atomics/             Technique library (YAML files)
-├── fetch.sh         Pulls techniques from official ART repo
-└── T*.yaml          Hand-crafted + ART-sourced technique definitions
+workspace/atomics/   Mounted Atomic Red Team YAML library
+└── T*/T*.yaml       Upstream technique definitions used by the Docker lab
 
 lab/
 ├── Vagrantfile      Multi-VM Vagrant lab (c2 + linux victim + win victim)
@@ -625,7 +602,7 @@ Demonstrates:
 
 ```bash
 # Start the lab first (if not already running)
-docker compose -f lab/docker-compose.yml up --build -d
+docker-compose -f lab/docker-compose.yml up --build -d
 
 # Example 1 — basic atomic test
 ./examples/run.sh examples/t1082-basic-discovery.yaml

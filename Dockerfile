@@ -16,7 +16,7 @@
 # └──────────────────────────────────────────────────────┘
 #
 # Runtime entrypoint (c2-docker-entrypoint.sh):
-#   1. Ensure /opt/atomics contains technique YAMLs, fetching them on demand.
+#   1. Use atomics mounted at /opt/atomics.
 #   2. Generate Sliver operator config once (persisted in volume).
 #   3. Start sliver-server daemon and wait for gRPC port 31337.
 #   4. Start scenario-server (foreground, PID 1).
@@ -52,7 +52,7 @@ FROM debian:bookworm-slim
 ARG SLIVER_VERSION=v1.7.3
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl ca-certificates sqlite3 libsqlite3-0 netcat-openbsd unzip \
+      curl ca-certificates sqlite3 libsqlite3-0 netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
 # Install sliver-server release binary
@@ -77,9 +77,6 @@ RUN chmod +x /usr/local/bin/scenario-server
 
 # Atomics and scenario/examples are mounted at runtime (see docker-compose volumes).
 RUN mkdir -p /etc/sliver /var/lib/scenario /opt/atomics
-
-COPY scenario/atomic/fetch.sh /usr/local/bin/fetch-atomics
-RUN chmod +x /usr/local/bin/fetch-atomics
 
 COPY scenario/lab/provision/c2-docker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

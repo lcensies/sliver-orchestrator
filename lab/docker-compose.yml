@@ -6,11 +6,11 @@
 #   victim-2    172.20.0.21   Ubuntu victim (second host for lateral movement demos)
 #
 # Usage (repo root = scenario/):
-#   # From repo root: build and start (first time)
-#   docker compose -f lab/docker-compose.yml up --build -d
+#   # Build and start
+#   docker-compose -f lab/docker-compose.yml up --build -d
 #
 #   # Or from lab/:
-#   cd lab && docker compose up --build -d
+#   cd lab && docker-compose up --build -d
 #
 #   # Watch logs:
 #   docker-compose logs -f c2
@@ -32,8 +32,6 @@
 #
 # Prerequisites:
 #   - Docker >= 24 + Docker Compose v2  (nothing else)
-
-version: "3.9"
 
 networks:
   lab:
@@ -64,15 +62,12 @@ services:
     volumes:
       - sliver-data:/root/.sliver
       - scenario-db:/var/lib/scenario
-      # Mount atomics and examples from repo root; atomics stay writable so the
-      # C2 entrypoint can auto-fetch missing YAMLs on first start.
+      # Mount atomics prepared on the host.
       - ../workspace/atomics:/opt/atomics
       - ../examples:/opt/scenario-examples:ro
     environment:
       - SCENARIO_LISTEN=:8080
       - SCENARIO_ATOMICS_DIR=/opt/atomics
-      - SCENARIO_ATOMICS_REPO_OWNER=${SCENARIO_ATOMICS_REPO_OWNER:-redcanaryco}
-      - SCENARIO_ATOMICS_REPO_BRANCH=${SCENARIO_ATOMICS_REPO_BRANCH:-master}
       - SCENARIO_DB_PATH=/var/lib/scenario/scenario.db
       - SCENARIO_SLIVER_CONFIG=/etc/sliver/scenario-operator.cfg
       - C2_HOST=172.20.0.10

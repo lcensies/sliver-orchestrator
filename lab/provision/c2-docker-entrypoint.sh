@@ -2,7 +2,7 @@
 # Docker entrypoint for the C2 container.
 #
 # Sequence:
-#   1. /opt/atomics is either volume-mounted (live from repo) or pre-seeded in image.
+#   1. Use atomics mounted at /opt/atomics.
 #   2. Generate Sliver operator config once (volume-persisted between restarts).
 #   3. Start sliver-server daemon and wait until its gRPC port is open.
 #   4. Start scenario-server (foreground, PID 1 via exec).
@@ -11,26 +11,6 @@ set -euo pipefail
 OPERATOR_CFG="/etc/sliver/scenario-operator.cfg"
 C2_HOST="${C2_HOST:-172.20.0.10}"
 ATOMICS_DIR="/opt/atomics"
-ATOMICS_REPO_OWNER="${SCENARIO_ATOMICS_REPO_OWNER:-redcanaryco}"
-ATOMICS_REPO_BRANCH="${SCENARIO_ATOMICS_REPO_BRANCH:-master}"
-
-has_atomic_yaml() {
-  if compgen -G "${ATOMICS_DIR}/**/*.yaml" > /dev/null; then
-    return 0
-  fi
-  if compgen -G "${ATOMICS_DIR}/**/*.yml" > /dev/null; then
-    return 0
-  fi
-  return 1
-}
-
-mkdir -p "${ATOMICS_DIR}"
-shopt -s globstar nullglob
-
-if ! has_atomic_yaml; then
-  echo "[c2] Atomics not found in ${ATOMICS_DIR}, fetching from ${ATOMICS_REPO_OWNER}/atomic-red-team (${ATOMICS_REPO_BRANCH})..."
-  /usr/local/bin/fetch-atomics "${ATOMICS_DIR}" "${ATOMICS_REPO_OWNER}" "${ATOMICS_REPO_BRANCH}"
-fi
 
 # ── 2. Operator config (once) ────────────────────────────────────────────────
 if [ ! -f "${OPERATOR_CFG}" ]; then
