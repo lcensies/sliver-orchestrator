@@ -1,4 +1,4 @@
-# Docker Compose lab — quick local testing alternative to Vagrant
+# Docker Compose lab for local scenario testing
 #
 # Topology:
 #   c2          172.20.0.10   sliver-server + scenario-server
@@ -63,7 +63,7 @@ services:
       - sliver-data:/root/.sliver
       - scenario-db:/var/lib/scenario
       # Mount atomics prepared on the host.
-      - ../workspace/atomics:/opt/atomics
+      - ../sliver-orchestrator-workspace/atomics:/opt/atomics
       - ../examples:/opt/scenario-examples:ro
     environment:
       - SCENARIO_LISTEN=:8080

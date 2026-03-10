@@ -6,14 +6,12 @@ A service wrapper on top of Sliver's gRPC API that supports building and executi
 
 ## Quick Start
 
-### 1. Prepare atomics
+### 1. Prepare `sliver-orchestrator-workspace`
 
-The Docker lab mounts atomics from `workspace/atomics`.
+The Docker lab mounts atomics from `sliver-orchestrator-workspace/atomics`. If `sliver-orchestrator-workspace` is tracked as a git submodule, initialize it instead of downloading atomics manually.
 
 ```bash
-mkdir -p workspace/atomics
-chmod +x atomic/fetch.sh
-./atomic/fetch.sh ./workspace/atomics
+git submodule update --init --recursive sliver-orchestrator-workspace
 ```
 
 ### 2. Start the lab
@@ -27,15 +25,23 @@ The compose stack exposes:
 - `http://127.0.0.1:18080` — Scenario REST API
 - `127.0.0.1:31337` — Sliver gRPC
 
-### 3. Run the example chain
+### 3. Build the runner
 
-If you are in the Sliver monorepo root:
+From the Sliver repo root:
+
+```bash
+make scenario-runner
+```
+
+### 4. Run the example chain
+
+If you are in the Sliver monorepo root, use:
 
 ```bash
 ./scenario-runner -chain scenario/examples/linux-full-chain.yaml -graph -online-print
 ```
 
-If `scenario-runner` is in the current directory, use:
+If you already have `scenario-runner` in the current directory, use:
 
 ```bash
 ./scenario-runner -chain examples/linux-full-chain.yaml -graph -online-print
@@ -47,7 +53,7 @@ If you are inside `scenario/` in the Sliver monorepo, use:
 ../scenario-runner -chain examples/linux-full-chain.yaml -graph -online-print
 ```
 
-### 4. Check the API
+### 5. Check the API
 
 ```bash
 curl http://127.0.0.1:18080/api/v1/health
@@ -75,35 +81,30 @@ docker-compose logs -f victim-1
 docker-compose down -v
 ```
 
-### Vagrant
-
-```bash
-packer build lab/packer/ubuntu.pkr.hcl
-# Optional:
-packer build lab/packer/windows.pkr.hcl
-
-cd lab
-vagrant up
-vagrant up victim-windows
-vagrant ssh c2-server
-curl http://192.168.56.10:8080/api/v1/health
-```
-
 ## Atomics Library
 
 Technique definitions use the [Atomic Red Team](https://github.com/redcanaryco/atomic-red-team) layout: `T1059.001/T1059.001.yaml`. The loader accepts both `.yaml` and `.yml` and scans subdirectories under the atomics root.
 
-For the Docker lab, put atomics in `workspace/atomics`:
+Preferred setup:
 
 ```bash
-mkdir -p workspace/atomics
-./atomic/fetch.sh ./workspace/atomics
+git submodule update --init --recursive sliver-orchestrator-workspace
+```
+
+The Docker lab reads atomics from `sliver-orchestrator-workspace/atomics`.
+
+If you want to populate that directory without the submodule:
+
+```bash
+mkdir -p sliver-orchestrator-workspace/atomics
+chmod +x atomic/fetch.sh
+./atomic/fetch.sh ./sliver-orchestrator-workspace/atomics
 ```
 
 Optional cleanup after download:
 
 ```bash
-./atomic/fetch.sh ./workspace/atomics --clean
+./atomic/fetch.sh ./sliver-orchestrator-workspace/atomics --clean
 ```
 
 `atomic/fetch.sh` downloads the GitHub archive and copies only the upstream `atomics/` tree. It does not install `Invoke-AtomicRedTeam` or PowerShell helper scripts.
@@ -112,7 +113,16 @@ For local execution on the C2 host, you can use [GoART](https://github.com/lcens
 
 ```bash
 go install github.com/lcensies/go-atomicredteam/cmd/goart@latest
-goart --technique T1059.001 --index 0 --atomics-path ./workspace/atomics
+goart --technique T1059.001 --index 0 --atomics-path ./sliver-orchestrator-workspace/atomics
+```
+
+## Building
+
+From the Sliver repo root:
+
+```bash
+make scenario          # build scenario-server
+make scenario-runner   # build scenario-runner
 ```
 
 ## Chain YAML Schema
@@ -538,14 +548,12 @@ Repo root = this directory (scenario/ in sliver monorepo, or the repo root when 
 ├── store/           SQLite persistence (GORM)
 └── api/             REST API handlers (Go 1.22 ServeMux)
 
-workspace/atomics/   Mounted Atomic Red Team YAML library
+sliver-orchestrator-workspace/atomics/   Mounted Atomic Red Team YAML library
 └── T*/T*.yaml       Upstream technique definitions used by the Docker lab
 
 lab/
-├── Vagrantfile      Multi-VM Vagrant lab (c2 + linux victim + win victim)
 ├── docker-compose.yml   Docker lab (c2 + 2 linux victims)
 ├── Dockerfile.victim    Victim container image
-├── packer/          Packer templates for offline box builds
 └── provision/       Shell + PowerShell provisioning scripts
 
 Dockerfile          C2 container image (multi-stage: scenario-server + runtime), at repo root
