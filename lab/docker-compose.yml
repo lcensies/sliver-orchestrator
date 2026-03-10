@@ -1,0 +1,126 @@
+# Docker Compose lab — quick local testing alternative to Vagrant
+#
+# Topology:
+#   c2          172.20.0.10   sliver-server + scenario-server
+#   victim-1    172.20.0.20   Ubuntu victim (sliver beacon via HTTP)
+#   victim-2    172.20.0.21   Ubuntu victim (second host for lateral movement demos)
+#
+# Usage (repo root = scenario/):
+#   # From repo root: build and start (first time)
+#   docker compose -f lab/docker-compose.yml up --build -d
+#
+#   # Or from lab/:
+#   cd lab && docker compose up --build -d
+#
+#   # Watch logs:
+#   docker-compose logs -f c2
+#
+#   # Get a shell on the C2:
+#   docker-compose exec c2 bash
+#
+#   # Stop and clean:
+#   docker-compose down -v
+#
+# Notes:
+#   - Windows victims require a real Windows VM; Docker Windows containers lack WinAPI.
+#   - The scenario REST API is exposed on host port 18080.
+#   - The Sliver gRPC port is exposed on host port 31337 so you can connect
+#     with sliver-client from your workstation.
+#   - scenario-server is built inside Docker (multi-stage) — no host Go toolchain needed.
+#   - On first `docker-compose up --build`, the c2 image build compiles scenario-server
+#     from source (vendor/ used, no network required for Go deps).
+#
+# Prerequisites:
+#   - Docker >= 24 + Docker Compose v2  (nothing else)
+
+version: "3.9"
+
+networks:
+  lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+volumes:
+  sliver-data:
+  scenario-db:
+
+services:
+  # ── C2 / Orchestrator ─────────────────────────────────────────────────────
+  c2:
+    # Context ../.. from lab/ = repo root (sliver root in monorepo; scenario/ when standalone with go.mod at root).
+    build:
+      context: ../..
+      dockerfile: scenario/Dockerfile
+    container_name: sliver-c2
+    hostname: c2-server
+    networks:
+      lab:
+        ipv4_address: 172.20.0.10
+    ports:
+      - "127.0.0.1:31337:31337"   # Sliver gRPC (for local sliver-client)
+      - "127.0.0.1:18080:8080"    # Scenario REST API
+    volumes:
+      - sliver-data:/root/.sliver
+      - scenario-db:/var/lib/scenario
+      # Mount atomics and examples from repo root; atomics stay writable so the
+      # C2 entrypoint can auto-fetch missing YAMLs on first start.
+      - ../workspace/atomics:/opt/atomics
+      - ../examples:/opt/scenario-examples:ro
+    environment:
+      - SCENARIO_LISTEN=:8080
+      - SCENARIO_ATOMICS_DIR=/opt/atomics
+      - SCENARIO_ATOMICS_REPO_OWNER=${SCENARIO_ATOMICS_REPO_OWNER:-redcanaryco}
+      - SCENARIO_ATOMICS_REPO_BRANCH=${SCENARIO_ATOMICS_REPO_BRANCH:-master}
+      - SCENARIO_DB_PATH=/var/lib/scenario/scenario.db
+      - SCENARIO_SLIVER_CONFIG=/etc/sliver/scenario-operator.cfg
+      - C2_HOST=172.20.0.10
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # ── Linux Victim 1 ────────────────────────────────────────────────────────
+  victim-1:
+    build:
+      context: ../..
+      dockerfile: scenario/lab/Dockerfile.victim
+    container_name: sliver-victim-1
+    hostname: victim-1
+    networks:
+      lab:
+        ipv4_address: 172.20.0.20
+    environment:
+      - C2_HOST=172.20.0.10
+      - SCENARIO_API=http://172.20.0.10:8080/api/v1
+    depends_on:
+      c2:
+        condition: service_healthy
+    restart: unless-stopped
+    # Limited capabilities to simulate a compromised host; tweak for specific technique testing
+    cap_add:
+      - SYS_PTRACE
+
+  # ── Linux Victim 2 (temporarily disabled — Windows VM reserved for this slot) ─
+  # victim-2:
+  #   build:
+  #     context: ../..
+  #     dockerfile: scenario/lab/Dockerfile.victim
+  #   container_name: sliver-victim-2
+  #   hostname: victim-2
+  #   networks:
+  #     lab:
+  #       ipv4_address: 172.20.0.21
+  #   environment:
+  #     - C2_HOST=172.20.0.10
+  #     - SCENARIO_API=http://172.20.0.10:8080/api/v1
+  #   depends_on:
+  #     c2:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+  #   cap_add:
+  #     - SYS_PTRACE

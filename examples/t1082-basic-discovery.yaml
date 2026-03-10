@@ -1,0 +1,45 @@
+# t1082-basic-discovery.yaml
+#
+# Minimal example: runs a single Atomic Red Team test on a Linux victim.
+#
+# Technique: T1082 – System Information Discovery
+# Test 0:    "System info enumeration (Linux)"
+#   Runs: hostname, /etc/os-release, uname -r, nproc, free -h, uptime
+#
+# This is the simplest possible chain — one step, one atomic test.
+# Use it to verify that the lab is wired up correctly end-to-end.
+#
+# Usage:
+#   SESSION=$(curl -s http://127.0.0.1:18080/api/v1/sessions | jq -r '.[0].id')
+#   CHAIN_ID=$(curl -s -X POST http://127.0.0.1:18080/api/v1/chains \
+#     -H 'Content-Type: application/yaml' \
+#     --data-binary @examples/t1082-basic-discovery.yaml | jq -r .id)
+#   EXEC_ID=$(curl -s -X POST http://127.0.0.1:18080/api/v1/chains/${CHAIN_ID}/execute \
+#     -H 'Content-Type: application/json' \
+#     -d "{\"session_id\":\"${SESSION}\"}" | jq -r .execution_id)
+#   curl -N http://127.0.0.1:18080/api/v1/executions/${EXEC_ID}/stream
+
+id: t1082-basic-discovery
+name: "T1082 — System Information Discovery"
+description: >
+  Single-step atomic test chain.  Runs T1082 test 0 on the target session.
+  Captures stdout into 'sysinfo_out' for downstream use.
+mitre_tactics:
+  - discovery
+tags:
+  - example
+  - atomic
+  - linux
+  - t1082
+
+steps:
+  - id: sysinfo
+    name: "System Information Discovery"
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1082
+        test: 0            # "System info enumeration (Linux)"
+    output_var: sysinfo_out
+    timeout: "30s"
+    on_fail: continue

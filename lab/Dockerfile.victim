@@ -1,0 +1,16 @@
+# Dockerfile.victim — Linux victim container
+# Simulates a compromised Ubuntu host; receives and runs a Sliver beacon.
+FROM ubuntu:22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl wget ca-certificates bash procps iproute2 net-tools \
+      openssh-server sudo python3 nmap \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a realistic user account
+RUN useradd -m -s /bin/bash victim && echo "victim:victim" | chpasswd
+
+COPY scenario/lab/provision/victim-docker-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
