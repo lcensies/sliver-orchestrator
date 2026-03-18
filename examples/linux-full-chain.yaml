@@ -115,7 +115,7 @@ steps:
       type: atomic
       atomic_ref:
         id: T1082
-        test: 0              # "System info enumeration (Linux)"
+        test: 2              # "List OS Information (Linux, sh)"
     output_var: sysinfo_out
     timeout: "30s"
     on_fail: continue_no_err
@@ -164,7 +164,7 @@ steps:
       type: atomic
       atomic_ref:
         id: T1016
-        test: 0              # "Network configuration enumeration (Linux)"
+        test: 2              # "System Network Configuration Discovery (sh)"
     timeout: "15s"
     on_fail: continue_no_err
 
@@ -177,7 +177,7 @@ steps:
       type: atomic
       atomic_ref:
         id: T1049
-        test: 0              # "List network connections (Linux)"
+        test: 3              # "System Network Connections Discovery via ss or lsof (bash)"
     timeout: "15s"
     on_fail: continue_no_err
 
@@ -187,11 +187,11 @@ steps:
     conditions:
       - victim_os|contains: Linux
     action:
-      type: atomic
-      atomic_ref:
-        id: T1083
-        test: 0              # "Find sensitive files (Linux)"
-    timeout: "60s"
+      type: command
+      command:
+        interpreter: sh
+        cmd: "find /home /tmp /var/tmp -maxdepth 3 -type f 2>/dev/null | head -50"
+    timeout: "30s"
     on_fail: continue_no_err
 
   # ── Phase 2.5: Targeted credential hunt ─────────────────────────────────────
@@ -259,18 +259,21 @@ steps:
         kind: software_exists
         software: crontab
         platform: linux
+    output_var: crontab_path
     on_fail: continue_no_err  # no crontab → skip Path A, do not fail the chain
 
   - id: cron_persistence
     name: "T1059.004 — Cron job persistence"
     depends_on: [check_crontab]
+    conditions:
+      - crontab_path|matches: "\\S+"
     action:
       type: atomic
       atomic_ref:
         id: T1059.004
-        test: 2              # "Cron-based persistence (execution via cron)"
+        test: 1              # "Command-Line Interface (sh)"
         args:
-          command: "id >> /tmp/.scenario_beacon.log"
+          command: "(crontab -l 2>/dev/null; echo '* * * * * id >> /tmp/.scenario_beacon.log') | crontab -"
     timeout: "15s"
     on_fail: continue_no_err  # optional: cron path may fail in containers
 
@@ -343,7 +346,7 @@ steps:
     action:
       type: atomic
       atomic_ref:
-        id: T1070.001
-        test: 2              # "Clear bash history (Linux)"
+        id: T1070.003
+        test: 1              # "Clear Bash history (echo)"
     timeout: "10s"
     on_fail: continue_no_err

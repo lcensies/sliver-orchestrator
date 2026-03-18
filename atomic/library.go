@@ -70,7 +70,7 @@ func (lib *Library) LoadDir(dir string) error {
 			if relErr != nil {
 				rel = path
 			}
-			return fmt.Errorf("loading %s: %w", rel, err)
+			fmt.Fprintf(os.Stderr, "WARNING: skipping %s: %v\n", rel, err)
 		}
 	}
 	return nil

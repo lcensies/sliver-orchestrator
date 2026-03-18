@@ -12,7 +12,7 @@ set -euo pipefail
 OPERATOR_CFG="/etc/sliver/scenario-operator.cfg"
 BUILDER_CFG="/etc/sliver/builder-operator.cfg"
 C2_HOST="${C2_HOST:-172.20.0.10}"
-ATOMICS_DIR="/opt/atomics"
+ATOMICS_DIR="${SCENARIO_ATOMICS_DIR:-/opt/atomics}"
 
 # ── 1. Unpack assets into volume if not already present ──────────────────────
 # sliver-server unpack writes Go toolchain into /root/.sliver.

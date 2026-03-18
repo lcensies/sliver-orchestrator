@@ -62,12 +62,12 @@ services:
     volumes:
       - sliver-data:/root/.sliver
       - scenario-db:/var/lib/scenario
-      # Mount atomics prepared on the host.
-      - ../sliver-orchestrator-workspace/atomics:/opt/atomics
+      # Mount workspace from repo (atomics + future extensions).
+      - ../sliver-orchestrator-workspace:/opt/workspace
       - ../examples:/opt/scenario-examples:ro
     environment:
       - SCENARIO_LISTEN=:8080
-      - SCENARIO_ATOMICS_DIR=/opt/atomics
+      - SCENARIO_ATOMICS_DIR=/opt/workspace/atomics
       - SCENARIO_DB_PATH=/var/lib/scenario/scenario.db
       - SCENARIO_SLIVER_CONFIG=/etc/sliver/scenario-operator.cfg
       - C2_HOST=172.20.0.10
