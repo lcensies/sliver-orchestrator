@@ -101,7 +101,7 @@ steps:
         kind: kernel
         platform: linux
     output_var: kernel_ver
-    on_fail: continue
+    on_fail: continue_no_err
 
   # ── Phase 2: Parallel discovery ─────────────────────────────────────────────
   # All five steps below share the same depends_on so they run concurrently.
@@ -118,7 +118,7 @@ steps:
         test: 0              # "System info enumeration (Linux)"
     output_var: sysinfo_out
     timeout: "30s"
-    on_fail: continue
+    on_fail: continue_no_err
 
   - id: account_discovery
     name: "T1087 — Account Discovery"
@@ -139,7 +139,7 @@ steps:
         regex: "([^:\n]+):x:1[0-9]{3}:"
         group: 1
     timeout: "15s"
-    on_fail: continue
+    on_fail: continue_no_err
 
   - id: hostname_probe
     name: "Probe — Capture hostname"
@@ -153,7 +153,7 @@ steps:
         cmd: "hostname"
     output_var: victim_hostname
     timeout: "5s"
-    on_fail: continue
+    on_fail: continue_no_err
 
   - id: net_config
     name: "T1016 — Network Configuration Discovery"
@@ -166,7 +166,7 @@ steps:
         id: T1016
         test: 0              # "Network configuration enumeration (Linux)"
     timeout: "15s"
-    on_fail: continue
+    on_fail: continue_no_err
 
   - id: net_connections
     name: "T1049 — System Network Connections Discovery"
@@ -179,7 +179,7 @@ steps:
         id: T1049
         test: 0              # "List network connections (Linux)"
     timeout: "15s"
-    on_fail: continue
+    on_fail: continue_no_err
 
   - id: file_discovery
     name: "T1083 — File and Directory Discovery"
@@ -192,7 +192,7 @@ steps:
         id: T1083
         test: 0              # "Find sensitive files (Linux)"
     timeout: "60s"
-    on_fail: continue
+    on_fail: continue_no_err
 
   # ── Phase 2.5: Targeted credential hunt ─────────────────────────────────────
   #
@@ -219,7 +219,7 @@ steps:
         cmd: "find /home/{{target_user}}/.ssh -maxdepth 1 -type f 2>/dev/null"
     output_var: ssh_keys_found
     timeout: "10s"
-    on_fail: continue
+    on_fail: continue_no_err
 
   - id: read_privkey
     name: "T1552.004 — Exfiltrate SSH private key for captured user"
@@ -293,7 +293,7 @@ steps:
           command: "id >> /tmp/.bashrc_beacon_{{victim_hostname}}.log"
           marker: "scenario-bashrc-persistence"
     timeout: "10s"
-    on_fail: continue
+    on_fail: continue_no_err
 
   # ── Path C: /etc/profile.d/ ──────────────────────────────────────────────────
 
@@ -311,7 +311,7 @@ steps:
           command: "id >> /tmp/.profile_d_beacon.log"
           script_name: "99-update-check.sh"
     timeout: "10s"
-    on_fail: continue
+    on_fail: continue_no_err
 
   # ── Path D: SUID bash ────────────────────────────────────────────────────────
 
@@ -328,7 +328,7 @@ steps:
         args:
           suid_path: "/tmp/.bash_update"
     timeout: "10s"
-    on_fail: continue
+    on_fail: continue_no_err
 
   # ── Phase 4: Defense evasion ────────────────────────────────────────────────
   # Waits for all four persistence paths to settle before erasing tracks.
@@ -346,4 +346,4 @@ steps:
         id: T1070.001
         test: 2              # "Clear bash history (Linux)"
     timeout: "10s"
-    on_fail: continue
+    on_fail: continue_no_err

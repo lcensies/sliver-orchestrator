@@ -2,55 +2,59 @@
 
 A service wrapper on top of Sliver's gRPC API that supports building and executing multi-stage attack chains for cyber range training. Chains are directed acyclic graphs (DAGs) of steps, where steps can forward their output to later steps and gate execution on conditions.
 
-**Repo root** in this README means the `scenario/` directory. In the Sliver monorepo, run Docker and helper scripts from `scenario/`.
+All commands in this README are run from the **repo root** (`sliver-orchestrator/`).
 
 ## Quick Start
 
 ### 1. Prepare `sliver-orchestrator-workspace`
 
-The Docker lab mounts atomics from `sliver-orchestrator-workspace/atomics`. If `sliver-orchestrator-workspace` is tracked as a git submodule, initialize it instead of downloading atomics manually.
+The Docker lab mounts atomics from `../sliver-orchestrator-workspace/atomics` relative to `lab/docker-compose.yml`, which resolves to a sibling directory of the repo:
 
-```bash
-git submodule update --init --recursive sliver-orchestrator-workspace
+```
+sliver-orchestrator/          ← repo root (run all commands here)
+sliver-orchestrator-workspace/
+└── atomics/                  ← ART technique YAMLs mounted into Docker
 ```
 
-### 2. Start the lab
+The workspace is tracked as a git submodule and atomics are already included. Initialize and pull it with:
 
 ```bash
-docker-compose -f lab/docker-compose.yml up --build -d
-docker-compose logs -f c2
+git submodule update --init --remote
+```
+
+If you need to refresh atomics manually or don't use the submodule:
+
+```bash
+mkdir -p ../sliver-orchestrator-workspace/atomics
+chmod +x atomic/fetch.sh
+./atomic/fetch.sh ../sliver-orchestrator-workspace/atomics
+```
+
+### 2. Build the scenario-runner
+
+```bash
+make scenario-runner
+```
+
+This produces a `scenario-runner` binary in the repo root.
+
+### 3. Start the lab
+
+Run from the repo root:
+
+```bash
+docker compose -f lab/docker-compose.yml up --build -d
+docker compose -f lab/docker-compose.yml logs -f c2
 ```
 
 The compose stack exposes:
 - `http://127.0.0.1:18080` — Scenario REST API
 - `127.0.0.1:31337` — Sliver gRPC
 
-### 3. Build the runner
-
-From the Sliver repo root:
-
-```bash
-make scenario-runner
-```
-
 ### 4. Run the example chain
-
-If you are in the Sliver monorepo root, use:
-
-```bash
-./scenario-runner -chain scenario/examples/linux-full-chain.yaml -graph -online-print
-```
-
-If you already have `scenario-runner` in the current directory, use:
 
 ```bash
 ./scenario-runner -chain examples/linux-full-chain.yaml -graph -online-print
-```
-
-If you are inside `scenario/` in the Sliver monorepo, use:
-
-```bash
-../scenario-runner -chain examples/linux-full-chain.yaml -graph -online-print
 ```
 
 ### 5. Check the API
@@ -72,39 +76,32 @@ What starts automatically:
 3. On the first implant request, `scenario-server` starts a Sliver HTTP listener on port `80` and builds a Linux beacon.
 4. When the victim checks in, it appears in `GET /api/v1/sessions`.
 
-Useful commands:
+Useful commands (run from repo root):
 
 ```bash
-docker-compose -f lab/docker-compose.yml up --build -d
-docker-compose logs -f c2
-docker-compose logs -f victim-1
-docker-compose down -v
+docker compose -f lab/docker-compose.yml up --build -d
+docker compose -f lab/docker-compose.yml logs -f c2
+docker compose -f lab/docker-compose.yml logs -f victim-1
+docker compose -f lab/docker-compose.yml down -v
 ```
 
 ## Atomics Library
 
 Technique definitions use the [Atomic Red Team](https://github.com/redcanaryco/atomic-red-team) layout: `T1059.001/T1059.001.yaml`. The loader accepts both `.yaml` and `.yml` and scans subdirectories under the atomics root.
 
-Preferred setup:
+The Docker lab reads atomics from `../sliver-orchestrator-workspace/atomics` (sibling of the repo). The workspace submodule includes atomics already — initialize it with `git submodule update --init --remote`.
+
+To refresh atomics manually:
 
 ```bash
-git submodule update --init --recursive sliver-orchestrator-workspace
-```
-
-The Docker lab reads atomics from `sliver-orchestrator-workspace/atomics`.
-
-If you want to populate that directory without the submodule:
-
-```bash
-mkdir -p sliver-orchestrator-workspace/atomics
 chmod +x atomic/fetch.sh
-./atomic/fetch.sh ./sliver-orchestrator-workspace/atomics
+./atomic/fetch.sh ../sliver-orchestrator-workspace/atomics
 ```
 
 Optional cleanup after download:
 
 ```bash
-./atomic/fetch.sh ./sliver-orchestrator-workspace/atomics --clean
+./atomic/fetch.sh ../sliver-orchestrator-workspace/atomics --clean
 ```
 
 `atomic/fetch.sh` downloads the GitHub archive and copies only the upstream `atomics/` tree. It does not install `Invoke-AtomicRedTeam` or PowerShell helper scripts.
@@ -118,12 +115,14 @@ goart --technique T1059.001 --index 0 --atomics-path ./sliver-orchestrator-works
 
 ## Building
 
-From the Sliver repo root:
+From the repo root:
 
 ```bash
-make scenario          # build scenario-server
-make scenario-runner   # build scenario-runner
+make scenario-runner   # build scenario-runner (output: ./scenario-runner)
+make scenario          # build scenario-server (output: ./scenario-server)
 ```
+
+`scenario-server` requires CGO (for SQLite). The Docker lab builds it automatically — you only need `make scenario-server` for local development outside Docker.
 
 ## Chain YAML Schema
 
