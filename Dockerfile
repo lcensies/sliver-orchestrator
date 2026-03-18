@@ -30,13 +30,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /src
 
-# Copy only what the scenario packages need.
+# Copy only what the server packages need.
 # The vendor/ tree carries every external dependency, so no network access
 # is required during the build (reproducible + air-gap friendly).
 COPY go.mod go.sum ./
 COPY vendor/    vendor/
-COPY protobuf/  protobuf/
-COPY scenario/  scenario/
+COPY api/       api/
+COPY atomic/    atomic/
+COPY chain/     chain/
+COPY cmd/       cmd/
+COPY config/    config/
+COPY sliver/    sliver/
+COPY store/     store/
 
 RUN CGO_ENABLED=1 go build \
       -mod=vendor \
@@ -44,7 +49,7 @@ RUN CGO_ENABLED=1 go build \
       -tags go_sqlite \
       -ldflags "-s -w" \
       -o /scenario-server \
-      ./scenario/cmd/server
+      ./cmd/server
 
 # ── Stage 2: runtime image ────────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -78,7 +83,7 @@ RUN chmod +x /usr/local/bin/scenario-server
 # Atomics and scenario/examples are mounted at runtime (see docker-compose volumes).
 RUN mkdir -p /etc/sliver /var/lib/scenario /opt/atomics
 
-COPY scenario/lab/provision/c2-docker-entrypoint.sh /entrypoint.sh
+COPY lab/provision/c2-docker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 31337 80 8080

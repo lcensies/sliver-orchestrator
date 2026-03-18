@@ -47,7 +47,8 @@ func (s *Server) handleCreateChain(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid step graph: "+err.Error())
 		return
 	}
-	if ch.ID == "" {
+	idWasExplicit := ch.ID != ""
+	if !idWasExplicit {
 		ch.ID = uuid.NewString()
 	}
 	data, _ := json.Marshal(ch)
@@ -57,8 +58,14 @@ func (s *Server) handleCreateChain(w http.ResponseWriter, r *http.Request) {
 		Description: ch.Description,
 		Data:        string(data),
 	}
-	if err := s.store.CreateChain(rec); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	var storeErr error
+	if idWasExplicit {
+		storeErr = s.store.UpdateChain(rec)
+	} else {
+		storeErr = s.store.CreateChain(rec)
+	}
+	if storeErr != nil {
+		writeError(w, http.StatusInternalServerError, storeErr.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, ch)

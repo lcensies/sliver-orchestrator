@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create a realistic user account
 RUN useradd -m -s /bin/bash victim && echo "victim:victim" | chpasswd
 
-COPY scenario/lab/provision/victim-docker-entrypoint.sh /entrypoint.sh
+COPY lab/provision/victim-docker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

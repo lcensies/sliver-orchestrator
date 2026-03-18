@@ -49,8 +49,8 @@ services:
   c2:
     # Context ../.. from lab/ = repo root (sliver root in monorepo; scenario/ when standalone with go.mod at root).
     build:
-      context: ../..
-      dockerfile: scenario/Dockerfile
+      context: ..
+      dockerfile: Dockerfile
     container_name: sliver-c2
     hostname: c2-server
     networks:
@@ -82,8 +82,8 @@ services:
   # ── Linux Victim 1 ────────────────────────────────────────────────────────
   victim-1:
     build:
-      context: ../..
-      dockerfile: scenario/lab/Dockerfile.victim
+      context: ..
+      dockerfile: lab/Dockerfile.victim
     container_name: sliver-victim-1
     hostname: victim-1
     networks:

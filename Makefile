@@ -142,6 +142,74 @@ servers: clean .downloaded_assets validate-go-version
 	GOOS=darwin GOARCH=arm64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),server $(LDFLAGS) -o sliver-server_darwin-arm64$(ARTIFACT_SUFFIX) ./server
 	GOOS=darwin GOARCH=amd64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),server $(LDFLAGS) -o sliver-server_darwin-amd64$(ARTIFACT_SUFFIX) ./server
 
+# ── Proto sync ────────────────────────────────────────────────────────────────
+# Fetch proto files from the BishopFox/sliver GitHub repo at the same version
+# as the server binary in Dockerfile, then regenerate the pb.go files in vendor.
+#
+# Usage:
+#   make sync-proto
+#   make sync-proto SLIVER_VERSION=v1.7.3   # override version
+#
+# Requires: protoc, and Go (protoc-gen-go / protoc-gen-go-grpc auto-installed)
+
+SLIVER_VERSION ?= $(shell grep -oP 'SLIVER_VERSION=\K[^ ]+' Dockerfile | head -1)
+PROTO_BASE_URL  = https://raw.githubusercontent.com/BishopFox/sliver/$(SLIVER_VERSION)/protobuf
+PROTO_VENDOR    = vendor/github.com/bishopfox/sliver/protobuf
+PROTO_TMP       = /tmp/sliver-proto-$(SLIVER_VERSION)
+
+PROTO_FILES = \
+	commonpb/common.proto \
+	sliverpb/sliver.proto \
+	clientpb/client.proto \
+	rpcpb/services.proto
+
+.PHONY: sync-proto
+sync-proto:
+	@echo "==> Syncing Sliver protobuf $(SLIVER_VERSION)"
+	@command -v protoc >/dev/null 2>&1 || { echo "ERROR: protoc not found. Install protobuf-compiler."; exit 1; }
+	@echo "==> Installing/updating protoc plugins..."
+	@GOBIN=$(shell go env GOPATH)/bin go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+	@GOBIN=$(shell go env GOPATH)/bin go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+	@export PATH="$(shell go env GOPATH)/bin:$$PATH"; \
+	rm -rf $(PROTO_TMP) && mkdir -p $(PROTO_TMP); \
+	echo "==> Downloading proto files from $(PROTO_BASE_URL)..."; \
+	for f in $(PROTO_FILES); do \
+		mkdir -p $(PROTO_TMP)/$$(dirname $$f); \
+		curl -fsSL $(PROTO_BASE_URL)/$$f -o $(PROTO_TMP)/$$f || { echo "ERROR: failed to fetch $$f"; exit 1; }; \
+		echo "  fetched $$f"; \
+	done; \
+	echo "==> Regenerating pb.go files..."; \
+	mkdir -p $(PROTO_VENDOR)/commonpb $(PROTO_VENDOR)/sliverpb $(PROTO_VENDOR)/clientpb $(PROTO_VENDOR)/rpcpb; \
+	protoc -I $(PROTO_TMP) \
+		$(PROTO_TMP)/commonpb/common.proto \
+		$(PROTO_TMP)/sliverpb/sliver.proto \
+		$(PROTO_TMP)/clientpb/client.proto \
+		--go_out=$(PROTO_VENDOR)/.. \
+		--go_opt=module=github.com/bishopfox/sliver \
+		--go_opt=Mcommonpb/common.proto=github.com/bishopfox/sliver/protobuf/commonpb \
+		--go_opt=Msliverpb/sliver.proto=github.com/bishopfox/sliver/protobuf/sliverpb \
+		--go_opt=Mclientpb/client.proto=github.com/bishopfox/sliver/protobuf/clientpb; \
+	protoc -I $(PROTO_TMP) \
+		$(PROTO_TMP)/rpcpb/services.proto \
+		--go_out=$(PROTO_VENDOR)/.. \
+		--go-grpc_out=$(PROTO_VENDOR)/.. \
+		--go_opt=module=github.com/bishopfox/sliver \
+		--go_opt=Mcommonpb/common.proto=github.com/bishopfox/sliver/protobuf/commonpb \
+		--go_opt=Msliverpb/sliver.proto=github.com/bishopfox/sliver/protobuf/sliverpb \
+		--go_opt=Mclientpb/client.proto=github.com/bishopfox/sliver/protobuf/clientpb \
+		--go_opt=Mrpcpb/services.proto=github.com/bishopfox/sliver/protobuf/rpcpb \
+		--go-grpc_opt=module=github.com/bishopfox/sliver \
+		--go-grpc_opt=Mcommonpb/common.proto=github.com/bishopfox/sliver/protobuf/commonpb \
+		--go-grpc_opt=Msliverpb/sliver.proto=github.com/bishopfox/sliver/protobuf/sliverpb \
+		--go-grpc_opt=Mclientpb/client.proto=github.com/bishopfox/sliver/protobuf/clientpb \
+		--go-grpc_opt=Mrpcpb/services.proto=github.com/bishopfox/sliver/protobuf/rpcpb; \
+	cp -v $(PROTO_TMP)/commonpb/common.proto $(PROTO_VENDOR)/commonpb/; \
+	cp -v $(PROTO_TMP)/sliverpb/sliver.proto  $(PROTO_VENDOR)/sliverpb/; \
+	cp -v $(PROTO_TMP)/clientpb/client.proto  $(PROTO_VENDOR)/clientpb/; \
+	cp -v $(PROTO_TMP)/rpcpb/services.proto   $(PROTO_VENDOR)/rpcpb/; \
+	rm -rf $(PROTO_TMP); \
+	echo "==> Done. Vendor protos updated for $(SLIVER_VERSION)"
+
 # Build the scenario orchestrator (requires CGO for SQLite)
 .PHONY: scenario
 scenario:
@@ -150,7 +218,7 @@ scenario:
 # Build the scenario runner (client for scenario API; no CGO)
 .PHONY: scenario-runner
 scenario-runner:
-	$(GO) build -mod=vendor -trimpath $(LDFLAGS) -o scenario-runner ./cmd/scenario-runner
+	cd cmd/scenario-runner && $(GO) build -mod=vendor -trimpath -o ../../scenario-runner .
 
 .PHONY: pb
 pb:

