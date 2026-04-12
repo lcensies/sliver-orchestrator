@@ -1,1 +1,7 @@
 scenario-runner
+.vagrant/
+*.exe
+lab/bin/
+.vagrant/
+*.exe
+lab/bin/
