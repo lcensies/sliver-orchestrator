@@ -257,6 +257,7 @@ func (e *Executor) runStep(
 
 	// Substitute variables into the action
 	action := SubstituteAction(s.Action, localVars)
+	stepSession := EffectiveStepSessionID(s, sessionID, localVars)
 
 	// Resolve atomic refs into a concrete CommandAction before dispatch
 	if action.Type == ActionAtomic {
@@ -275,7 +276,7 @@ func (e *Executor) runStep(
 	defer cancel()
 
 	start := time.Now()
-	stdout, stderr, exitCode, execErr := e.stepExec.Execute(stepCtx, sessionID, action)
+	stdout, stderr, exitCode, execErr := e.stepExec.Execute(stepCtx, stepSession, action)
 	dur := time.Since(start)
 
 	if execErr != nil || exitCode != 0 {

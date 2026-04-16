@@ -158,6 +158,11 @@ type Step struct {
 	Conditions []Condition `json:"conditions" yaml:"conditions"`
 	Action     Action      `json:"action"     yaml:"action"`
 
+	// SessionID optionally targets a different Sliver session than the one passed to
+	// POST .../execute. Supports {{VarName}} substitution from prior step output.
+	// Empty or omitted uses the execution default session.
+	SessionID string `json:"session_id,omitempty" yaml:"session_id,omitempty"`
+
 	// OutputVar captures the stdout of this step into a named variable that
 	// later steps can reference with {{VarName}} syntax.
 	// If OutputFilter is also set, the extracted capture group is stored instead.
