@@ -1,0 +1,49 @@
+# Two Sliver beacons in one chain using per-step session_id
+#
+# POST /chains/{id}/execute still supplies the primary session_id (first victim).
+# Steps may set session_id to run on another beacon; {{VarName}} is substituted
+# from prior step output (same as command fields).
+#
+# Setup:
+#   1. Ensure two beacons check in (e.g. enable victim-2 in lab/docker-compose.yml).
+#   2. Call GET /api/v1/sessions and copy the UUID of the beacon that is NOT the
+#      one you pass to execute.
+#   3. Replace the placeholder UUID in peer_beacon_id below, then POST this chain.
+
+id: lateral-two-beacons
+name: Second beacon via per-step session_id
+description: Primary beacon runs peer_beacon_id; a later step targets another session.
+mitre_tactics: [lateral-movement]
+tags: [demo, multi-session]
+
+steps:
+  - id: primary_marker
+    name: Confirm primary beacon
+    action:
+      type: command
+      command:
+        interpreter: sh
+        cmd: "hostname"
+    output_var: primary_host
+
+  - id: peer_beacon_id
+    depends_on: [primary_marker]
+    name: Peer UUID — replace placeholder with GET /sessions value
+    action:
+      type: command
+      command:
+        interpreter: sh
+        cmd: 'printf "%s\n" "00000000-0000-4000-8000-000000000002"'
+    output_var: peer_session
+
+  - id: on_peer_hostname
+    depends_on: [peer_beacon_id]
+    name: Hostname on second beacon
+    session_id: "{{peer_session}}"
+    action:
+      type: command
+      command:
+        interpreter: sh
+        cmd: "hostname"
+    output_var: peer_host
+    timeout: "30s"
