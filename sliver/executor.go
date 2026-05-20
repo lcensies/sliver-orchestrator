@@ -70,6 +70,9 @@ func (e *Executor) execCommand(ctx context.Context, sessionID string, cmd *chain
 	if err != nil {
 		return "", "", 1, fmt.Errorf("Execute RPC: %w", err)
 	}
+	if resp == nil {
+		return "", "", 1, fmt.Errorf("Execute RPC returned nil response")
+	}
 	if resp.Response != nil && resp.Response.Err != "" {
 		return string(resp.Stdout), string(resp.Stderr), int(resp.Status),
 			fmt.Errorf("remote error: %s", resp.Response.Err)

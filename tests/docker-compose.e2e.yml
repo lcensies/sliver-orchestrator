@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: ../
+      dockerfile: tests/cmd/testserver/Dockerfile
+    volumes:
+      - ./fixtures/atomics:/atomics:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18765/api/v1/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  frontend:
+    build:
+      context: ../../flexible-platform
+      args:
+        VITE_API_BASE_URL: "http://localhost:18080"
+    environment:
+      BACKEND_URL: http://api:18765
+    ports:
+      - "5173:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.44.0-jammy
+    working_dir: /tests
+    volumes:
+      - ./ui:/tests
+    environment:
+      BASE_URL: http://frontend
+      CI: "true"
+    command: sh -c "npm install && npx playwright install chromium && npx playwright test --reporter=list"
+    depends_on:
+      - frontend

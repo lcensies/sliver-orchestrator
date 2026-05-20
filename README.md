@@ -645,6 +645,54 @@ EXEC_ID=$(curl -s -X POST $API/chains/$CHAIN_ID/execute \
 curl -N $API/executions/$EXEC_ID/stream
 ```
 
+## Testing
+
+Tests live in four layers. All run on dev-vm-3 from the repo root unless noted.
+
+Go binary path: `/home/ubuntu/go-toolchain/bin/go`. CGO is required (SQLite).
+
+### Unit + integration (Go)
+
+```bash
+CGO_ENABLED=1 /home/ubuntu/go-toolchain/bin/go test ./store/... ./chain/... ./tests/api/... -v -count=1
+```
+
+| Package | Tests | What it covers |
+|---|---|---|
+| `store` | 9 | SQLite CRUD, ordering, filtering |
+| `chain` | 25 | DAG resolver, condition eval, executor (all `on_fail` policies, output vars, context cancel) |
+| `tests/api` | 32 | Every HTTP endpoint via `httptest.Server` + stub Sliver RPC — no real C2 needed |
+
+The `tests/api` suite uses a generated stub (`stub_rpc_test.go`) that satisfies all 186 methods of `rpcpb.SliverRPCClient`.
+
+### API E2E (Python)
+
+Starts a real `testserver` binary (built from `tests/cmd/testserver/`) against a temp SQLite file. No Sliver C2 required.
+
+```bash
+cd tests/e2e
+uv run pytest -v
+```
+
+26 tests covering health, CORS, atomics, full chain CRUD, executions, cancel, and SSE.
+
+### UI E2E (Playwright + Docker)
+
+Spins up three containers: testserver → nginx (React build) → Playwright. nginx proxies `/api/v1/` to the testserver, so every UI action hits the real API.
+
+```bash
+cd tests
+echo ubuntu | sudo -S docker-compose -f docker-compose.e2e.yml build   # first run only
+echo ubuntu | sudo -S docker-compose -f docker-compose.e2e.yml up --abort-on-container-exit
+echo ubuntu | sudo -S docker-compose -f docker-compose.e2e.yml down
+```
+
+9 Playwright tests: dashboard health card, nav links, scenarios list/create/delete, atomics listing, executions list and seeding via API.
+
+See `tests/PLAN.md` and `tests/REPORT.md` for full coverage details and bugs found during development.
+
+---
+
 ## Building and moving the package out
 
 The scenario packages live inside the Sliver Go module for convenience (shared vendored deps). To use as a standalone repo, copy this directory (scenario/) as the new repo root:

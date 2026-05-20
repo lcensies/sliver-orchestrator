@@ -1,1 +1,4 @@
 scenario-runner
+.pyc
+tests/e2e/__pycache__/
+tests/ui/node_modules

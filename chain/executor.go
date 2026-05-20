@@ -112,6 +112,7 @@ func (e *Executor) Run(ctx context.Context, ch Chain, sessionID, executionID str
 	failed := make(map[string]bool)     // step failed (used for dependency settlement)
 	failedOptional := make(map[string]bool) // failed with on_fail: continue_no_err — do not fail chain
 	skipped := make(map[string]bool)
+	skipDepOf := make(map[string]bool) // steps that were skipped due to skip_dependents propagation
 	scheduled := make(map[string]bool) // dispatched to a goroutine
 
 	abortCh := make(chan struct{})
@@ -124,6 +125,7 @@ func (e *Executor) Run(ctx context.Context, ch Chain, sessionID, executionID str
 		// Check for external cancellation or abort signal
 		select {
 		case <-ctx.Done():
+			wg.Wait()
 			return ctx.Err()
 		case <-abortCh:
 			wg.Wait()
@@ -143,7 +145,26 @@ func (e *Executor) Run(ctx context.Context, ch Chain, sessionID, executionID str
 		ready := ReadySteps(ch.Steps, completed, failed, skipped)
 		var toRun []string
 		for _, id := range ready {
-			if !scheduled[id] {
+			if scheduled[id] {
+				continue
+			}
+			// If any direct dependency failed with skip_dependents (or was itself
+			// skipped due to that policy), skip this step instead of running it.
+			shouldSkip := false
+			candidate := stepIndex[id]
+			for _, depID := range candidate.AllDepIDs() {
+				depStep := stepIndex[depID]
+				if skipDepOf[depID] || (failed[depID] && depStep.FailurePolicy() == FailSkipDependents) {
+					shouldSkip = true
+					break
+				}
+			}
+			if shouldSkip {
+				skipped[id] = true
+				skipDepOf[id] = true
+				e.emit(Event{Type: EventStepSkipped, StepID: id, Message: "dependency failed with skip_dependents"})
+				e.logStep(executionID, id, string(StatusSkipped), "", "", 0, "dependency failed with skip_dependents", 0)
+			} else {
 				scheduled[id] = true
 				toRun = append(toRun, id)
 			}
@@ -346,7 +367,7 @@ func (e *Executor) handleFailure(
 	case FailAbort:
 		abort()
 	case FailSkipDependents:
-		// The main loop will detect the step is in failed[] and skip its dependents
+		// Dependents are skipped in the main scheduling loop via the skipDepOf map.
 	}
 }
 
