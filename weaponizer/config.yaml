@@ -1,0 +1,25 @@
+infra:
+  external_c2:
+    c2_host: "93.184.216.34"
+    implant_url: "https://updates.com"
+  
+  internal_lateral:
+    c2_host: "10.10.10.5"
+    implant_url: "http://internal-web.local"
+
+payloads:
+  - name: "Linux Payload1"
+    type: "bash"
+    infra_ref: "external_c2"  
+    filename: "init.sh"
+    os: "linux"
+    arch: "amd64"
+
+  - name: "Linux Payload2"
+    type: "bash"
+    infra_ref: "internal_lateral" 
+    filename: "scan.sh"
+    os: "linux"
+    arch: "amd64"
+
+outputdir: /tmp

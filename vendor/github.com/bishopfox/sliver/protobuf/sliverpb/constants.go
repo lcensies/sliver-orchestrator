@@ -369,7 +369,9 @@ func MsgNumber(request proto.Message) uint32 {
 		return MsgInvokeExecuteAssemblyReq
 	case *ExecuteAssembly:
 		return MsgExecuteAssembly
-case *InvokeMigrateReq:
+	case *ExecuteTokenReq:
+		return MsgExecuteTokenReq
+	case *InvokeMigrateReq:
 		return MsgInvokeMigrateReq
 	case *SideloadReq:
 		return MsgSideloadReq
