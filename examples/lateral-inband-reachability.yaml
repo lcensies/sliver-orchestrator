@@ -1,0 +1,23 @@
+# In-band lateral prep from a single Sliver session (no second beacon required)
+#
+# Commands run on the compromised host only. This example probes reachability toward
+# another lab IP (second victim). Default compose has victim-2 commented out; expect
+# ping to fail unless you enable 172.20.0.21 or change the address.
+
+id: lateral-inband-reachability
+name: Probe second host from beacon (single session)
+description: From victim A, ping lab host B — classic first hop before SSH/wmi/etc.
+mitre_tactics: [lateral-movement, discovery]
+tags: [demo, linux, in-band]
+
+steps:
+  - id: ping_second_host
+    name: ICMP reachability toward second lab victim
+    action:
+      type: command
+      command:
+        interpreter: sh
+        cmd: "ping -c 1 -W 2 172.20.0.21"
+    output_var: ping_out
+    timeout: "15s"
+    on_fail: continue_no_err

@@ -355,8 +355,21 @@ Steps forward data to later steps through named variables referenced as `{{VarNa
 | `output_var` | Capture full stdout as a named variable |
 | `output_filter` | When set alongside `output_var`, extract a regex capture group instead of full stdout |
 | `output_extract` | List of `{var, regex, group}` — extract multiple named variables from stdout |
+| `session_id` | Optional per step: Sliver session UUID for this step only; supports `{{VarName}}` |
 
-`{{VarName}}` is substituted in `command.cmd`, `binary.url`, `binary.remote_path`, `binary.args`, `upload.local_path`, `upload.remote_path`, `atomic_ref.args.*`, and `sliver_rpc.params.*`.
+`{{VarName}}` is substituted in `command.cmd`, `binary.url`, `binary.remote_path`, `binary.args`, `upload.local_path`, `upload.remote_path`, `atomic_ref.args.*`, `sliver_rpc.params.*`, and per-step `session_id` (see below).
+
+### Per-step `session_id` (multiple beacons)
+
+By default every step uses the `session_id` from `POST /chains/{id}/execute`. A step may set its own `session_id` to target another Sliver session (another beacon). Values support `{{VarName}}` substitution from earlier steps, so you can capture a peer UUID (for example from a prior `command` or `python` step) and pivot in the same execution.
+
+Omit `session_id` or leave it empty to keep using the execution default. If substitution yields an empty string, the execution default is used.
+
+For **lateral movement** you can combine this with:
+
+- **Two beacons:** primary session in `execute`, later steps with `session_id: "{{peer_session}}"` — see [`examples/lateral-two-beacons.yaml`](examples/lateral-two-beacons.yaml).
+- **One beacon, remote execution:** run SSH, WinRM, PsExec, or atomics from the first host toward another machine — see [`examples/lateral-inband-reachability.yaml`](examples/lateral-inband-reachability.yaml).
+- **Python on C2:** a `python` step can still list sessions via sliver-py and interact with multiple beacons; with per-step `session_id`, built-in `SESSION_ID` for that step matches the session the server passes to sliver-py for that step.
 
 ```yaml
   - id: recon
@@ -558,9 +571,11 @@ lab/
 Dockerfile          C2 container image (multi-stage: scenario-server + runtime), at repo root
 
 examples/            Ready-to-use chain YAML files
-├── t1082-basic-discovery.yaml   Single atomic test (beginner)
-├── linux-full-chain.yaml        Full post-exploitation chain (advanced)
-└── run.sh                       Helper script: load + execute + stream results
+├── t1082-basic-discovery.yaml        Single atomic test (beginner)
+├── linux-full-chain.yaml             Full post-exploitation chain (advanced)
+├── lateral-two-beacons.yaml          Per-step session_id / second beacon
+├── lateral-inband-reachability.yaml  Single session; probe toward another host
+└── run.sh                            Helper script: load + execute + stream results
 ```
 
 ## Examples
@@ -605,6 +620,11 @@ Demonstrates:
 - **`skip_dependents`** — cron persistence silently skips if crontab is missing
 - **Output capture** — `output_var` stores stdout for later `{{VarName}}` substitution
 
+### Example 3 — Lateral movement (`lateral-two-beacons.yaml`, `lateral-inband-reachability.yaml`)
+
+- **Two Sliver sessions:** [`examples/lateral-two-beacons.yaml`](examples/lateral-two-beacons.yaml) runs on the primary beacon, stores a second session UUID in a variable, then runs a step with `session_id: "{{peer_session}}"`. Edit the placeholder UUID after `GET /api/v1/sessions` when you have two beacons.
+- **One session, in-band:** [`examples/lateral-inband-reachability.yaml`](examples/lateral-inband-reachability.yaml) pings `172.20.0.21` from the compromised host (enable `victim-2` in the lab compose if you want the ping to succeed).
+
 ### Running examples with `run.sh`
 
 ```bash
@@ -616,6 +636,10 @@ docker-compose -f lab/docker-compose.yml up --build -d
 
 # Example 2 — full attack chain
 ./examples/run.sh examples/linux-full-chain.yaml
+
+# Example 3 — lateral movement demos (edit lateral-two-beacons UUID if using two beacons)
+./examples/run.sh examples/lateral-inband-reachability.yaml
+./examples/run.sh examples/lateral-two-beacons.yaml
 ```
 
 The script:

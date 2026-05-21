@@ -1,0 +1,92 @@
+# examples/lateral_movement.yml
+#
+# Demonstrates per-step Sliver session targeting (field: session_id on a step).
+# POST /api/v1/chains/{id}/execute still receives the initial foothold session_id;
+# later steps may override it so gRPC calls run against another beacon after you
+# have that session's UUID (e.g. from a pivot, pass-the-hash callback, or
+# sliver-py listing sessions on the C2 host).
+#
+# Lab self-check (no second implant required):
+#   obtain_peer_session runs on the C2 as type: python and prints SESSION_ID from
+#   the environment (the same default session). Downstream steps set
+#   session_id: "{{peer_session}}" to prove substitution and dispatch wiring.
+#   In a real lateral chain, replace obtain_peer_session with whatever step
+#   captures the new implant UUID into {{peer_session}} (regex on tool output,
+#   Python calling the Sliver API, etc.).
+#
+# Usage (same pattern as linux-full-chain.yaml):
+#   SESSION=$(curl -s http://127.0.0.1:18080/api/v1/sessions | jq -r '.[0].id')
+#   CHAIN_ID=$(curl -s -X POST http://127.0.0.1:18080/api/v1/chains \
+#     -H 'Content-Type: application/yaml' \
+#     --data-binary @examples/lateral_movement.yml | jq -r .id)
+#   curl -s -X POST http://127.0.0.1:18080/api/v1/chains/${CHAIN_ID}/execute \
+#     -H 'Content-Type: application/json' \
+#     -d "{\"session_id\":\"${SESSION}\"}" | jq .
+
+id: lateral-movement-session-handoff
+name: "Lateral movement — hand off to another Sliver session"
+description: >
+  Foothold recon on the default session, capture a peer session UUID into a
+  variable, then run further remote actions on that session via session_id.
+mitre_tactics:
+  - lateral-movement
+  - discovery
+tags:
+  - example
+  - lateral-movement
+  - session_id
+
+steps:
+
+  - id: foothold_marker
+    name: "Identify foothold host (default session)"
+    action:
+      type: command
+      command:
+        interpreter: sh
+        cmd: "hostname"
+    output_var: foothold_host
+    timeout: "15s"
+    on_fail: abort
+
+  # Populates {{peer_session}}. In production, swap this for a step whose stdout
+  # contains the second beacon's UUID after your lateral technique completes.
+  - id: obtain_peer_session
+    name: "Resolve peer session id (lab: echo current SESSION_ID via python)"
+    depends_on: [foothold_marker]
+    action:
+      type: python
+      python:
+        inline: |
+          import os
+          print(os.environ.get("SESSION_ID", "").strip())
+    output_var: peer_session
+    timeout: "30s"
+    on_fail: abort
+
+  - id: peer_network_recon
+    name: "Run Ifconfig on the peer session (same UUID in lab; different host when pivoted)"
+    depends_on: [obtain_peer_session]
+    conditions:
+      - peer_session|matches: "\\S+"
+    session_id: "{{peer_session}}"
+    action:
+      type: sliver_rpc
+      sliver_rpc:
+        method: Ifconfig
+    output_var: peer_ifconfig
+    timeout: "30s"
+    on_fail: continue_no_err
+
+  - id: optional_foothold_only
+    name: "Conditional step still on foothold when flag is unset (skipped in default chain)"
+    depends_on: [foothold_marker]
+    conditions:
+      - foothold_host|eq: "__no_such_host__"
+    action:
+      type: command
+      command:
+        interpreter: sh
+        cmd: "echo should-not-run"
+    timeout: "5s"
+    on_fail: continue_no_err

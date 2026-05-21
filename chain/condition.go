@@ -61,6 +61,22 @@ func Substitute(s string, vars VarMap) string {
 	return s
 }
 
+// EffectiveStepSessionID selects the Sliver session for a step.
+// If s.SessionID is empty, defaultSession is used. Otherwise the field is trimmed,
+// {{VarName}} placeholders are replaced from vars, and a non-empty result is used;
+// if substitution yields an empty string, defaultSession is used.
+func EffectiveStepSessionID(s Step, defaultSession string, vars VarMap) string {
+	raw := strings.TrimSpace(s.SessionID)
+	if raw == "" {
+		return defaultSession
+	}
+	resolved := strings.TrimSpace(Substitute(raw, vars))
+	if resolved == "" {
+		return defaultSession
+	}
+	return resolved
+}
+
 // SubstituteAction returns a shallow copy of action with all string fields substituted.
 func SubstituteAction(a Action, vars VarMap) Action {
 	if a.Command != nil {
