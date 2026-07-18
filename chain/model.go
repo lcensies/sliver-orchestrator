@@ -35,6 +35,11 @@ const (
 	ActionPython ActionType = "python"
 	// ActionSliverRPC dispatches a named Sliver gRPC call with JSON parameters.
 	ActionSliverRPC ActionType = "sliver_rpc"
+	// ActionWaitBeacon polls the Sliver server until a beacon matching the given
+	// filter checks in, then emits its ID as stdout. Used after a beacon-delivery
+	// step so later steps can pivot onto the freshly landed beacon via
+	// session_id: "{{captured_var}}".
+	ActionWaitBeacon ActionType = "wait_beacon"
 )
 
 // FailPolicy controls executor behaviour when a step returns a non-zero exit code or error.
@@ -238,6 +243,7 @@ type Action struct {
 	Probe     *ProbeAction   `json:"probe"      yaml:"probe"`
 	Python    *PythonAction  `json:"python"     yaml:"python"`
 	RPCAction *RPCAction     `json:"sliver_rpc" yaml:"sliver_rpc"`
+	WaitBeacon *WaitBeaconAction `json:"wait_beacon" yaml:"wait_beacon"`
 }
 
 // CommandAction executes a raw command string using the named interpreter.
@@ -291,6 +297,30 @@ type BinaryAction struct {
 
 	// Cleanup removes the uploaded binary from the victim after execution.
 	Cleanup bool `json:"cleanup" yaml:"cleanup"`
+
+	// Background launches the binary detached (nohup on Linux, start /B on Windows)
+	// and returns immediately instead of waiting for it to exit. Required when
+	// deploying a long-running payload such as a Sliver beacon, which never returns
+	// and would otherwise block the step until the timeout fires.
+	Background bool `json:"background" yaml:"background"`
+}
+
+// WaitBeaconAction blocks until a beacon matching the filter checks in, then
+// returns its ID as stdout (capture with output_var to pivot later steps onto it).
+//
+// Hostname / RemoteAddress are substring filters (both must match when set) and
+// support {{VarName}} substitution. When neither is set, the most recently
+// checked-in beacon is returned. Exit 0 on match, exit 1 on timeout.
+type WaitBeaconAction struct {
+	// Hostname is a case-insensitive substring match against the beacon Hostname.
+	Hostname string `json:"hostname" yaml:"hostname"`
+	// RemoteAddress is a case-insensitive substring match against the beacon's
+	// remote address (e.g. the target's IP that you deployed the beacon to).
+	RemoteAddress string `json:"remote_address" yaml:"remote_address"`
+	// Timeout is a Go duration string (default "120s") to wait for a match.
+	Timeout string `json:"timeout" yaml:"timeout"`
+	// PollInterval is a Go duration string (default "5s") between server polls.
+	PollInterval string `json:"poll_interval" yaml:"poll_interval"`
 }
 
 // RPCAction calls a Sliver RPC method by name with a free-form parameter map.

