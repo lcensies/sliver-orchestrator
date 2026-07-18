@@ -5,3 +5,14 @@ lab/bin/
 .vagrant/
 *.exe
 lab/bin/
+
+# AI tool files (local only)
+CLAUDE.md
+.claude/
+.cursorrules
+
+# AI tool files (local only)
+CLAUDE.md
+.claude/
+.cursorrules
+scenario-server
