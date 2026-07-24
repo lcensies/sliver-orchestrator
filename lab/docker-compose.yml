@@ -4,6 +4,7 @@
 #   c2          172.20.0.10   sliver-server + scenario-server
 #   victim-1    172.20.0.20   Ubuntu victim (sliver beacon via HTTP)
 #   victim-2    172.20.0.21   Ubuntu victim (second host for lateral movement demos)
+#   victim-web  172.20.0.30   Deliberately vulnerable web app (initial-access E2E target)
 #
 # Usage (repo root = scenario/):
 #   # Build and start
@@ -65,6 +66,8 @@ services:
       # Mount workspace from repo (atomics + future extensions).
       - ../sliver-orchestrator-workspace:/opt/workspace
       - ../examples:/opt/scenario-examples:ro
+      # Initial-access module scripts invoked by the "external" module.
+      - ./exploits:/opt/exploits:ro
     environment:
       - SCENARIO_LISTEN=:8080
       - SCENARIO_ATOMICS_DIR=/opt/workspace/atomics
@@ -97,6 +100,26 @@ services:
         condition: service_healthy
     restart: unless-stopped
     # Limited capabilities to simulate a compromised host; tweak for specific technique testing
+    cap_add:
+      - SYS_PTRACE
+
+  # ── Vulnerable web target (initial-access E2E) ────────────────────────────────
+  # Deliberately vulnerable HTTP service (command injection at GET /ping?host=).
+  # It does NOT run a beacon itself — an initial_access step breaches it to obtain
+  # a session. See examples/initial-access-web.yaml.
+  victim-web:
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile.victim-web
+    container_name: sliver-victim-web
+    hostname: victim-web
+    networks:
+      lab:
+        ipv4_address: 172.20.0.30
+    depends_on:
+      c2:
+        condition: service_healthy
+    restart: unless-stopped
     cap_add:
       - SYS_PTRACE
 

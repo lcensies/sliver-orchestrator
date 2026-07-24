@@ -1,0 +1,16 @@
+# Dockerfile.victim-web — deliberately vulnerable web target.
+# Runs a tiny HTTP service with an OS command-injection endpoint (GET /ping?host=).
+# An initial-access module exploits it to stage a Sliver beacon; unlike victim-1
+# this container does NOT auto-run a beacon — it is the thing to be breached.
+FROM ubuntu:22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 curl ca-certificates bash procps iproute2 iputils-ping \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY lab/provision/vulnweb/server.py /opt/vulnweb/server.py
+
+ENV PORT=8080
+EXPOSE 8080
+
+CMD ["python3", "/opt/vulnweb/server.py"]

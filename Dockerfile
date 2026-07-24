@@ -34,14 +34,15 @@ WORKDIR /src
 # The vendor/ tree carries every external dependency, so no network access
 # is required during the build (reproducible + air-gap friendly).
 COPY go.mod go.sum ./
-COPY vendor/    vendor/
-COPY api/       api/
-COPY atomic/    atomic/
-COPY chain/     chain/
-COPY cmd/       cmd/
-COPY config/    config/
-COPY sliver/    sliver/
-COPY store/     store/
+COPY vendor/        vendor/
+COPY api/           api/
+COPY atomic/        atomic/
+COPY chain/         chain/
+COPY cmd/           cmd/
+COPY config/        config/
+COPY initialaccess/ initialaccess/
+COPY sliver/        sliver/
+COPY store/         store/
 
 RUN CGO_ENABLED=1 go build \
       -mod=vendor \
@@ -76,6 +77,17 @@ RUN ARCH=$(dpkg --print-architecture) \
 # cached as a Docker layer — runs once per SLIVER_VERSION bump).
 RUN sliver-server unpack --force
 
+# Runtime for initial-access exploit modules (the "external" module shells out to
+# these on the C2 host). Placed AFTER the ~500 MB sliver unpack layer and BEFORE the
+# scenario-server COPY so it is cached across both SLIVER_VERSION and Go-code changes.
+# uv lets exploit bundles under /opt/exploits declare and sync their own deps
+# (e.g. `uv run exploit.py`) without baking them into the image.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-venv git \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+    && uv --version && python3 --version
+
 # Copy the scenario-server binary built in stage 1
 COPY --from=builder /scenario-server /usr/local/bin/scenario-server
 RUN chmod +x /usr/local/bin/scenario-server
@@ -86,6 +98,10 @@ RUN mkdir -p /etc/sliver /var/lib/scenario /opt/atomics
 COPY lab/provision/c2-docker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 31337 80 8080
+# Only expose the ports the operator reaches from the host. The Sliver HTTP C2
+# listener still binds :80 inside the container (container-internal, reached by
+# victims over the lab network) — EXPOSE 80 is unnecessary and, under rootless
+# podman-compose, causes a failing attempt to host-publish privileged port 80.
+EXPOSE 31337 8080
 
 ENTRYPOINT ["/entrypoint.sh"]

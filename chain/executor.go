@@ -15,11 +15,11 @@ import (
 type StepStatus string
 
 const (
-	StatusPending  StepStatus = "pending"
-	StatusRunning  StepStatus = "running"
-	StatusDone     StepStatus = "done"
-	StatusFailed   StepStatus = "failed"
-	StatusSkipped  StepStatus = "skipped"
+	StatusPending StepStatus = "pending"
+	StatusRunning StepStatus = "running"
+	StatusDone    StepStatus = "done"
+	StatusFailed  StepStatus = "failed"
+	StatusSkipped StepStatus = "skipped"
 )
 
 // StepResult is the output of a completed (or failed/skipped) step.
@@ -37,12 +37,12 @@ type StepResult struct {
 type EventType string
 
 const (
-	EventStepStart    EventType = "step_start"
-	EventStepDone     EventType = "step_done"
-	EventStepFailed   EventType = "step_failed"
-	EventStepSkipped  EventType = "step_skipped"
-	EventChainDone    EventType = "chain_done"
-	EventChainFailed  EventType = "chain_failed"
+	EventStepStart   EventType = "step_start"
+	EventStepDone    EventType = "step_done"
+	EventStepFailed  EventType = "step_failed"
+	EventStepSkipped EventType = "step_skipped"
+	EventChainDone   EventType = "chain_done"
+	EventChainFailed EventType = "chain_failed"
 )
 
 // Event is emitted by the Executor for each significant state change.
@@ -73,6 +73,9 @@ type Executor struct {
 	atomics  AtomicResolver
 	store    *store.Store
 	events   chan Event
+	// targets holds the current run's declared targets, keyed by name, for resolving
+	// initial_access steps. Set at the start of Run (one Executor is created per run).
+	targets map[string]Target
 }
 
 // NewExecutor creates an Executor.  atomics may be nil (atomic steps will fail gracefully).
@@ -106,10 +109,15 @@ func (e *Executor) Run(ctx context.Context, ch Chain, sessionID, executionID str
 		stepIndex[s.ID] = s
 	}
 
+	e.targets = make(map[string]Target, len(ch.Targets))
+	for _, t := range ch.Targets {
+		e.targets[t.Name] = t
+	}
+
 	var mu sync.Mutex
 	vars := make(VarMap)
-	completed := make(map[string]bool)   // successfully finished
-	failed := make(map[string]bool)     // step failed (used for dependency settlement)
+	completed := make(map[string]bool)      // successfully finished
+	failed := make(map[string]bool)         // step failed (used for dependency settlement)
 	failedOptional := make(map[string]bool) // failed with on_fail: continue_no_err — do not fail chain
 	skipped := make(map[string]bool)
 	skipDepOf := make(map[string]bool) // steps that were skipped due to skip_dependents propagation
@@ -288,6 +296,22 @@ func (e *Executor) runStep(
 			return
 		}
 		action = resolved
+	}
+
+	// Resolve the declared target for initial_access steps before dispatch so the
+	// step executor gets the concrete host/attrs without needing the whole chain.
+	if action.Type == ActionInitialAccess {
+		if action.InitialAccess == nil {
+			e.handleFailure(s, executionID, "", "", 1, "initial_access action missing 'initial_access' block", 0, mu, failed, failedOptional, skipped, abort)
+			return
+		}
+		name := action.InitialAccess.Target
+		tgt, ok := e.targets[name]
+		if !ok {
+			e.handleFailure(s, executionID, "", "", 1, fmt.Sprintf("unknown target %q; declare it in the chain 'targets:' block", name), 0, mu, failed, failedOptional, skipped, abort)
+			return
+		}
+		action.SetResolvedTarget(tgt)
 	}
 
 	e.emit(Event{Type: EventStepStart, StepID: s.ID})

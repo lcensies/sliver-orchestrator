@@ -100,11 +100,14 @@ func (s *Server) handleGetImplantLinux(w http.ResponseWriter, r *http.Request) {
 
 		resp, err := s.rpc.Generate(ctx, &clientpb.GenerateReq{
 			Config: &clientpb.ImplantConfig{
-				GOOS:             "linux",
-				GOARCH:           arch,
-				Format:           clientpb.OutputFormat_EXECUTABLE,
-				IsBeacon:         false,
-				HTTPC2ConfigName: "default",
+				GOOS:     "linux",
+				GOARCH:   arch,
+				Format:   clientpb.OutputFormat_EXECUTABLE,
+				IsBeacon: false,
+				// NB: no HTTPC2ConfigName — the vendored proto (Sliver ~v1.5, paired
+				// with sliver-server v1.7.3) has no named HTTP C2 profiles; generation
+				// uses the server's default HTTP C2 config. The C2 URL below is what
+				// actually points the implant at this server.
 				C2: []*clientpb.ImplantC2{
 					{Priority: 0, URL: c2URL},
 				},
