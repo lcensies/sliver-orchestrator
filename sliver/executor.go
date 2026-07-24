@@ -18,19 +18,30 @@ import (
 	"github.com/bishopfox/sliver/protobuf/rpcpb"
 	"github.com/bishopfox/sliver/protobuf/sliverpb"
 	"github.com/bishopfox/sliver/scenario/chain"
+	"github.com/bishopfox/sliver/scenario/initialaccess"
 )
 
 // Executor dispatches chain step actions to a remote Sliver session via gRPC.
 // It implements chain.StepExecutor.
 type Executor struct {
-	rpc     rpcpb.SliverRPCClient
-	cfgPath string // path to the Sliver operator .cfg file; injected into python steps
+	rpc       rpcpb.SliverRPCClient
+	cfgPath   string // path to the Sliver operator .cfg file; injected into python steps
+	iaModules *initialaccess.Registry
 }
 
 // NewExecutor creates an Executor backed by an established Sliver RPC client.
 // cfgPath is the operator config file path forwarded to Python steps as SLIVER_CONFIG.
+// The initial-access module registry defaults to the built-in modules; use
+// WithInitialAccessModules to override (e.g. in tests).
 func NewExecutor(rpc rpcpb.SliverRPCClient, cfgPath string) *Executor {
-	return &Executor{rpc: rpc, cfgPath: cfgPath}
+	return &Executor{rpc: rpc, cfgPath: cfgPath, iaModules: initialaccess.DefaultRegistry()}
+}
+
+// WithInitialAccessModules overrides the initial-access module registry and returns
+// the executor for chaining.
+func (e *Executor) WithInitialAccessModules(r *initialaccess.Registry) *Executor {
+	e.iaModules = r
+	return e
 }
 
 // Execute dispatches a single action and returns stdout, stderr, exit code, and any transport error.
@@ -48,6 +59,8 @@ func (e *Executor) Execute(ctx context.Context, sessionID string, action chain.A
 		return e.execPython(ctx, sessionID, action.Python)
 	case chain.ActionSliverRPC:
 		return e.execRPC(ctx, sessionID, action.RPCAction)
+	case chain.ActionInitialAccess:
+		return e.execInitialAccess(ctx, action)
 	default:
 		return "", "", 1, fmt.Errorf("executor received unresolved action type %q (should be pre-resolved by chain executor)", action.Type)
 	}
@@ -59,10 +72,10 @@ func (e *Executor) execCommand(ctx context.Context, sessionID string, cmd *chain
 		return "", "", 1, fmt.Errorf("nil command action")
 	}
 
-        // 5-minute deadline for slow commands
-        execCtx, execCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-        defer execCancel()
-        _ = ctx
+	// 5-minute deadline for slow commands
+	execCtx, execCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer execCancel()
+	_ = ctx
 	path, args := buildArgs(cmd.Interpreter, cmd.Cmd)
 
 	resp, err := e.rpc.Execute(execCtx, &sliverpb.ExecuteReq{
@@ -404,10 +417,10 @@ func (e *Executor) execRPC(ctx context.Context, sessionID string, rpcAct *chain.
 
 	case "Netstat":
 		resp, err := e.rpc.Netstat(ctx, &sliverpb.NetstatReq{
-			TCP:     true,
-			UDP:     true,
+			TCP:       true,
+			UDP:       true,
 			Listening: true,
-			Request: reqFor(sessionID),
+			Request:   reqFor(sessionID),
 		})
 		if err != nil {
 			return "", "", 1, fmt.Errorf("Netstat RPC: %w", err)
@@ -426,6 +439,62 @@ func (e *Executor) execRPC(ctx context.Context, sessionID string, rpcAct *chain.
 	default:
 		return "", "", 1, fmt.Errorf("unsupported sliver_rpc method %q; supported: Ps, Screenshot, Ifconfig, Netstat", rpcAct.Method)
 	}
+}
+
+// execInitialAccess runs a pluggable initial-access module against the step's
+// resolved target to obtain a new Sliver session. It snapshots existing sessions,
+// runs the module, then waits for a newly registered session and returns its UUID
+// as stdout so the chain can capture it with output_var.
+func (e *Executor) execInitialAccess(ctx context.Context, action chain.Action) (string, string, int, error) {
+	ia := action.InitialAccess
+	if ia == nil {
+		return "", "", 1, fmt.Errorf("nil initial_access action")
+	}
+	tgt, ok := action.ResolvedTarget()
+	if !ok {
+		return "", "", 1, fmt.Errorf("initial_access target %q was not resolved (missing from chain targets)", ia.Target)
+	}
+
+	mod, err := e.iaModules.Get(ia.Module)
+	if err != nil {
+		return "", "", 1, err
+	}
+
+	// Snapshot before delivery so we can identify the session that appears after.
+	before, err := snapshotSessionIDs(ctx, e.rpc)
+	if err != nil {
+		return "", "", 1, fmt.Errorf("snapshotting sessions before delivery: %w", err)
+	}
+
+	req := initialaccess.Request{
+		Target: initialaccess.Target{
+			Name:  tgt.Name,
+			Host:  tgt.Host,
+			Port:  tgt.Port,
+			Attrs: tgt.Attrs,
+		},
+		Config: ia.Config,
+	}
+	res, err := mod.Run(ctx, req)
+	if err != nil {
+		return "", res.Note, 1, fmt.Errorf("initial-access module %q failed: %w", ia.Module, err)
+	}
+	if !res.Ok {
+		return "", res.Note, 1, fmt.Errorf("initial-access module %q reported failure: %s", ia.Module, res.Note)
+	}
+
+	// Prefer the module's hostname hint for correlation when the scenario didn't set one.
+	wait := ia.Wait
+	if wait.MatchHostname == "" && res.Hostname != "" {
+		wait.MatchHostname = res.Hostname
+	}
+
+	newID, err := waitForNewSession(ctx, e.rpc, before, wait)
+	if err != nil {
+		return "", res.Note, 1, err
+	}
+	stdout := newID
+	return stdout, res.Note, 0, nil
 }
 
 // reqFor builds a commonpb.Request with the given session ID and a long timeout.

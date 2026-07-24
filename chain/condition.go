@@ -120,6 +120,18 @@ func SubstituteAction(a Action, vars VarMap) Action {
 		rpc.Params = newParams
 		a.RPCAction = &rpc
 	}
+	if a.InitialAccess != nil {
+		ia := *a.InitialAccess
+		ia.Target = Substitute(ia.Target, vars)
+		newCfg := make(map[string]string, len(ia.Config))
+		for k, v := range ia.Config {
+			newCfg[k] = Substitute(v, vars)
+		}
+		ia.Config = newCfg
+		ia.Wait.MatchHostname = Substitute(ia.Wait.MatchHostname, vars)
+		ia.Wait.MatchOS = Substitute(ia.Wait.MatchOS, vars)
+		a.InitialAccess = &ia
+	}
 	return a
 }
 

@@ -12,7 +12,7 @@
 #   3. Boots VMs in order (c2 → linux_pivot → win_target)
 #   4. Deploys scenario-server to c2 VM
 #   5. Imports Sliver operator config to Kali
-#   6. Sets up linux_pivot services (honeypot, svc-server, implant watchdog)
+#   6. Sets up linux_pivot services (honeypot, vulnweb initial-access target, svc-server)
 #   7. Sets up Kali auto-boot service (vagrant-lab.service)
 #   8. Fetches atomic techniques
 #   9. Starts frontend dev server
@@ -25,10 +25,16 @@ C2_PORT="8080"
 FRONTEND_DIR="${REPO_DIR}/flexible-platform"
 
 # ── Colors ───────────────────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
-ok()   { echo -e "${GREEN}[✓]${NC} $*"; }
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+ok() { echo -e "${GREEN}[✓]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
-err()  { echo -e "${RED}[✗]${NC} $*"; exit 1; }
+err() {
+  echo -e "${RED}[✗]${NC} $*"
+  exit 1
+}
 info() { echo -e "    $*"; }
 
 echo ""
@@ -100,7 +106,7 @@ echo ""
 
 # ── Step 5: Import Sliver operator config ────────────────────────────────────
 echo "── Step 5: Importing Sliver operator config ────────────────────"
-vagrant ssh c2 -- -q "sudo cat /etc/sliver/scenario-operator.cfg" 2>/dev/null > /tmp/op.cfg
+vagrant ssh c2 -- -q "sudo cat /etc/sliver/scenario-operator.cfg" 2>/dev/null >/tmp/op.cfg
 if [ -s /tmp/op.cfg ]; then
   sliver-client import /tmp/op.cfg 2>/dev/null && ok "Sliver operator config imported" || warn "Config import failed (may already exist)"
 else
@@ -117,7 +123,16 @@ if [ -f "${REPO_DIR}/honeypot.py" ]; then
   ok "honeypot.py uploaded"
 fi
 
-vagrant ssh linux_pivot << 'SSHEOF'
+# Copy the deliberately-vulnerable vulnweb app — this IS the real initial-access
+# target (command injection in GET /ping?host=). The honeypot above is cosmetic
+# decoration; vulnweb is what examples/full-attack-chain-v2.yaml's initial_access
+# step actually exploits to obtain the first Linux session.
+if [ -f "${REPO_DIR}/lab/provision/vulnweb/server.py" ]; then
+  vagrant upload "${REPO_DIR}/lab/provision/vulnweb/server.py" /tmp/vulnweb.py linux_pivot
+  ok "vulnweb server.py uploaded"
+fi
+
+vagrant ssh linux_pivot <<'SSHEOF'
 set -e
 
 # ── Honeypot service ──────────────────────────────────────────────────────────
@@ -128,6 +143,21 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /tmp/honeypot.py 0.0.0.0 8080
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# ── vulnweb service (real initial-access target — command injection) ─────────
+sudo tee /etc/systemd/system/vulnweb.service > /dev/null << 'EOF'
+[Unit]
+Description=Vulnerable Web App (initial-access target, CWE-78 command injection)
+After=network.target
+[Service]
+Type=simple
+Environment=PORT=9090
+ExecStart=/usr/bin/python3 /tmp/vulnweb.py
 Restart=always
 RestartSec=3
 [Install]
@@ -151,47 +181,28 @@ TimeoutStartSec=600
 WantedBy=multi-user.target
 EOF
 
-# ── Implant watchdog ──────────────────────────────────────────────────────────
-sudo tee /usr/local/bin/implant-watchdog.sh > /dev/null << 'EOF'
-#!/bin/bash
-while true; do
-    pgrep -x sliver-implant > /dev/null || systemctl restart sliver-implant
-    sleep 30
-done
-EOF
-sudo chmod +x /usr/local/bin/implant-watchdog.sh
-
-sudo tee /etc/systemd/system/implant-watchdog.service > /dev/null << 'EOF'
-[Unit]
-Description=Sliver Implant Watchdog
-After=sliver-implant.service
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/implant-watchdog.sh
-Restart=always
-RestartSec=5
-[Install]
-WantedBy=multi-user.target
-EOF
-
 # ── UFW firewall rules ────────────────────────────────────────────────────────
 sudo ufw allow 8080/tcp 2>/dev/null || true
+sudo ufw allow 9090/tcp 2>/dev/null || true
 
 # ── Enable + start all services ───────────────────────────────────────────────
+# NOTE: no implant-watchdog here anymore — there is no pre-installed
+# sliver-implant systemd unit to babysit. The first Linux session now comes
+# exclusively from exploiting vulnweb via the chain's initial_access step.
 sudo systemctl daemon-reload
-sudo systemctl enable honeypot svc-server implant-watchdog 2>/dev/null || true
-sudo systemctl restart honeypot svc-server implant-watchdog 2>/dev/null || true
+sudo systemctl enable honeypot vulnweb svc-server 2>/dev/null || true
+sudo systemctl restart honeypot vulnweb svc-server 2>/dev/null || true
 
 echo "Services status:"
-sudo systemctl is-active honeypot svc-server implant-watchdog 2>/dev/null || true
+sudo systemctl is-active honeypot vulnweb svc-server 2>/dev/null || true
 SSHEOF
-ok "linux_pivot services configured"
+ok "linux_pivot services configured (vulnweb :9090 is the initial-access target)"
 echo ""
 
 # ── Step 7: Kali auto-boot service ───────────────────────────────────────────
 echo "── Step 7: Setting up Kali auto-boot service ───────────────────"
 VAGRANT_PATH="$(which vagrant)"
-sudo tee /etc/systemd/system/vagrant-lab.service > /dev/null << EOF
+sudo tee /etc/systemd/system/vagrant-lab.service >/dev/null <<EOF
 [Unit]
 Description=Sliver Lab VMs
 After=network.target graphical.target
@@ -239,22 +250,21 @@ else
 fi
 echo ""
 
-# ── Step 10: Wait for sessions ───────────────────────────────────────────────
-echo "── Step 10: Waiting for sessions ──────────────────────────────"
-info "Waiting up to 3 min for Linux + Windows sessions..."
-for i in $(seq 1 18); do
-  SESSIONS=$(curl -sf "http://${C2_IP}:${C2_PORT}/api/v1/sessions" 2>/dev/null | jq -r '.[] | "\(.os) \(.hostname) pid:\(.pid)"' 2>/dev/null || echo "")
-  if echo "$SESSIONS" | grep -q "linux" && echo "$SESSIONS" | grep -q "windows"; then
-    ok "Both sessions active:"
-    echo "$SESSIONS" | while read -r s; do info "$s"; done
-    break
-  elif echo "$SESSIONS" | grep -q "linux"; then
-    info "Linux session active, waiting for Windows... ($i/18)"
-  else
-    info "Waiting for sessions... ($i/18)"
-  fi
-  sleep 10
-done
+# ── Step 10: Check for sessions ───────────────────────────────────────────────
+# No session appears automatically anymore: linux_pivot ships clean (no
+# pre-installed implant) and win_target never had one (isolated by design).
+# The first session now comes exclusively from breaching vulnweb via the
+# initial_access step in examples/full-attack-chain-v2.yaml.
+echo "── Step 10: Checking for sessions ──────────────────────────────"
+SESSIONS=$(curl -sf "http://${C2_IP}:${C2_PORT}/api/v1/sessions" 2>/dev/null | jq -r '.[] | "\(.os) \(.hostname) pid:\(.pid)"' 2>/dev/null || echo "")
+if [ -n "$SESSIONS" ]; then
+  ok "Active sessions:"
+  echo "$SESSIONS" | while read -r s; do info "$s"; done
+else
+  info "No sessions yet (expected — nothing is pre-installed)."
+  info "Run the initial-access chain to breach linux_pivot's vulnweb service:"
+  info "  ./examples/run.sh examples/full-attack-chain-v2.yaml"
+fi
 echo ""
 
 # ── Done ─────────────────────────────────────────────────────────────────────
