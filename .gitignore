@@ -8,3 +8,4 @@ lab/bin/
 win10_custom.box
 scenario-server
 *.box
+*.log
