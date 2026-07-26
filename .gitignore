@@ -1,0 +1,7 @@
+# Atomics are fetched from upstream (Atomic Red Team), not committed here.
+/atomics/*
+!/atomics/README.md
+
+# Local build/scratch
+*.log
+__pycache__/
