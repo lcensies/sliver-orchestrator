@@ -109,5 +109,6 @@ func (r *Registry) names() []string {
 func DefaultRegistry() *Registry {
 	r := NewRegistry()
 	r.Register(&ExternalModule{})
+	r.Register(&MetasploitModule{})
 	return r
 }

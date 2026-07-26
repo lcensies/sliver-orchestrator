@@ -12,7 +12,7 @@ IMPLANT_NAME="victim-linux-$(hostname)"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y --no-install-recommends curl ca-certificates
+apt-get install -y --no-install-recommends curl ca-certificates nmap arp-scan
 
 # ── Wait for scenario API ────────────────────────────────────────────────────
 echo "[provision] Waiting for scenario API at ${SCENARIO_API}..."

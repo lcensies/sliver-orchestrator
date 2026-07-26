@@ -1,0 +1,25 @@
+name: Quick Windows Service Discovery (SMB, SSH, WinRM)
+description: checks ports 22, 445, 5985, 5986 on the target
+tags:
+  - discovery
+  - port-scan
+mitre_tactics:
+  - discovery
+steps:
+  - id: reliable_scan
+    name: Scan SMB, SSH, WinRM (2s timeout)
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          TARGET=172.16.1.20
+          for port in 22 445 5985 5986; do
+            if timeout 2 bash -c "echo >/dev/tcp/$TARGET/$port" 2>/dev/null; then
+              echo "OPEN:   $TARGET:$port"
+            else
+              echo "CLOSED: $TARGET:$port"
+            fi
+          done
+    output_var: service_status
+    on_fail: continue

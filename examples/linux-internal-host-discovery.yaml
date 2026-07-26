@@ -1,0 +1,16 @@
+name: linux Internal host discovery
+description: Quickly find alive hosts on 172.16.1.0/24 using parallel pings.
+tags:
+  - discovery
+mitre_tactics:
+  - discovery
+steps:
+  - id: ping_sweep
+    name: Parallel ping sweep
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: for i in {1..254}; do (ping -c1 -W1 172.16.1.$i | grep "bytes from" &); done; wait
+    output_var: alive_hosts
+    on_fail: continue

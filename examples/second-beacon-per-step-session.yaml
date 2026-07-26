@@ -1,0 +1,40 @@
+name: Second beacon via per-step session_id
+description: Primary beacon runs peer_beacon_id; a later step targets another session.
+tags:
+  - demo
+  - multi-session
+mitre_tactics:
+  - lateral-movement
+steps:
+  - id: primary_marker
+    name: Confirm primary beacon
+    action:
+      type: command
+      command:
+        interpreter: sh
+        cmd: hostname
+    output_var: primary_host
+    on_fail: abort
+  - id: peer_beacon_id
+    name: Peer UUID — replace placeholder with GET /sessions value
+    depends_on:
+      - primary_marker
+    action:
+      type: command
+      command:
+        interpreter: sh
+        cmd: printf "%s\n" "4b96272f-aa05-4559-a196-f3453dad88f3"
+    output_var: peer_session
+    on_fail: abort
+  - id: on_peer_hostname
+    name: Hostname on second beacon (Windows)
+    depends_on:
+      - peer_beacon_id
+    action:
+      type: command
+      command:
+        interpreter: cmd
+        cmd: hostname
+    output_var: peer_host
+    timeout: 30s
+    on_fail: abort

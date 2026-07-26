@@ -74,7 +74,12 @@ func (e *Executor) execCommand(ctx context.Context, sessionID string, cmd *chain
 
 	path, args := buildArgs(cmd.Interpreter, cmd.Cmd)
 
-	resp, err := e.rpc.Execute(ctx, &sliverpb.ExecuteReq{
+	// Allow slow remote commands up to 5 minutes, while still honoring
+	// cancellation/deadline from the caller's context.
+	execCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	resp, err := e.rpc.Execute(execCtx, &sliverpb.ExecuteReq{
 		Path:    path,
 		Args:    args,
 		Output:  true,
@@ -496,9 +501,10 @@ func (e *Executor) execInitialAccess(ctx context.Context, action chain.Action) (
 	return stdout, res.Note, 0, nil
 }
 
-// reqFor builds a commonpb.Request with the given session ID.
+// reqFor builds a commonpb.Request with the given session ID and a long
+// implant-side timeout (300s) so slow remote commands are not cut short.
 func reqFor(sessionID string) *commonpb.Request {
-	return &commonpb.Request{SessionID: sessionID}
+	return &commonpb.Request{SessionID: sessionID, Timeout: 300}
 }
 
 // buildArgs constructs the executable path and argument list for the given interpreter.

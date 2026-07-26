@@ -447,8 +447,8 @@ module runs, then polls `GetSessions` until a session that wasn't there before a
 **Modules are pluggable.** A module is anything that breaches a target and installs a
 beacon — it never needs to know Sliver's session UUID (the framework correlates that).
 
-- **`external`** (built-in) runs *any* executable/script, so Metasploit (`msfconsole -r`),
-  a custom Python exploit, or a shell one-liner all work without recompiling. Contract:
+- **`external`** (built-in) runs *any* executable/script — a custom Python exploit,
+  a shell one-liner, or even `msfconsole -r` via a wrapper script. Contract:
   the full request is written as JSON to the child's stdin, and the child prints a JSON
   result on stdout:
 
@@ -460,11 +460,34 @@ beacon — it never needs to know Sliver's session UUID (the framework correlate
   If stdout isn't JSON, success is inferred from the process exit code. Config keys:
   `run` (argv, JSON array or whitespace-split string) or `shell` (a `sh -c` string).
 
+- **`metasploit`** (built-in) drives Metasploit Framework exploits via `msfconsole`
+  resource scripts. It supports **brute-force mode**: when `module` and/or `payload`
+  are JSON arrays, every combination is tried in sequence until a session opens.
+
+  | Config key | Required | Description |
+  |---|---|---|
+  | `module` | yes | MSF exploit module (string or JSON array for brute-force) |
+  | `payload` | no | Payload name (string or JSON array for brute-force) |
+  | `lhost` | yes | Listen host for reverse connections |
+  | `lport` | no | Listen port (default `4444`) |
+  | `options` | no | JSON object of extra MSF `set` commands, e.g. `{"THREADS":"10"}` |
+  | `target_index` | no | MSF target index (`set TARGET`) |
+  | `session_wait` | no | Seconds to wait for session after exploit (default `15`) |
+  | `msfconsole` | no | Path to msfconsole binary (default `msfconsole`) |
+  | `stop_on_success` | no | `false` to run all brute-force combos (default `true`) |
+  | `post_exploit_cmd` | no | Command to run in the opened session (e.g. stage a Sliver implant) |
+  | `extra_args` | no | Extra arguments appended to msfconsole |
+
+  The module generates a resource script (`use`, `set RHOSTS/RPORT/LHOST/LPORT/payload/options`,
+  `exploit -j -z`, `sleep`, `sessions -l`, optional Ruby post-exploit block, `exit -y`),
+  runs `msfconsole -q -r <tmpfile>`, and parses stdout for `session N opened` to detect success.
+
 - **Native modules**: implement `initialaccess.Module` (`Name()` + `Run(ctx, Request)`)
   and register it in `initialaccess.DefaultRegistry()`. Referenced by its `Name()`.
 
-See `examples/initial-access-web.yaml` for a full runnable example against the lab's
-`victim-web` container (`lab/exploits/web_rce.py` is the module script).
+See `examples/initial-access-web.yaml` for a runnable example using the `external` module
+against the lab's vulnweb target, and `examples/initial-access-metasploit.yaml` for a
+Metasploit brute-force example against a Linux SSH target.
 
 ### Condition operators
 

