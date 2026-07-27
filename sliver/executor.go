@@ -60,7 +60,7 @@ func (e *Executor) execCommand(ctx context.Context, sessionID string, cmd *chain
 	}
 
         // 5-minute deadline for slow commands
-        execCtx, execCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+        execCtx, execCancel := context.WithTimeout(context.Background(), 15*time.Minute)
         defer execCancel()
         _ = ctx
 	path, args := buildArgs(cmd.Interpreter, cmd.Cmd)
