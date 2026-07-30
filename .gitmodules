@@ -1,3 +1,6 @@
 [submodule "sliver-orchestrator-workspace"]
 	path = sliver-orchestrator-workspace
 	url = https://github.com/lcensies/sliver-orchestrator-workspace
+[submodule "flexible-platform"]
+	path = flexible-platform
+	url = https://github.com/NikitaNekhay/flexible-platform.git
