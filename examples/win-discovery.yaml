@@ -1,0 +1,18 @@
+name: win-discovery
+steps:
+  - id: T1082_6_mrpqw40k_3
+    name: T1082 — Hostname Discovery (Windows)
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1082
+        test: 6
+    on_fail: abort
+  - id: T1016_0_mrpqz8t8_4
+    name: T1016 — System Network Configuration Discovery on Windows
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1016
+        test: 0
+    on_fail: abort

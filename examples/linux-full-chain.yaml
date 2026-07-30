@@ -128,7 +128,7 @@ steps:
     action:
       type: atomic
       atomic_ref:
-        id: T1087
+        id: T1087.001
         test: 0              # "Enumerate local users (Linux)"
     output_var: accounts_raw
     # Extract the first regular (UID ≥ 1000) username from /etc/passwd output.
@@ -281,20 +281,14 @@ steps:
 
   - id: persist_bashrc
     name: "T1546.004 — Persist via ~/.bashrc"
-    # hostname_probe added so {{victim_hostname}} is guaranteed to be set.
     depends_on: [account_discovery, hostname_probe]
     conditions:
       - victim_os|contains: Linux
     action:
-      type: atomic
-      atomic_ref:
-        id: T1546.004
-        test: 0              # "Persist via ~/.bashrc"
-        args:
-          # {{victim_hostname}} is substituted from the hostname_probe output_var,
-          # tagging the beacon log with the specific host for easy correlation.
-          command: "id >> /tmp/.bashrc_beacon_{{victim_hostname}}.log"
-          marker: "scenario-bashrc-persistence"
+      type: command
+      command:
+        interpreter: bash
+        cmd: "echo 'id >> /tmp/.bashrc_beacon.log' >> /root/.bashrc && echo 'bashrc_persistence_done'"
     timeout: "10s"
     on_fail: continue_no_err
 
@@ -306,13 +300,10 @@ steps:
     conditions:
       - victim_os|contains: Linux
     action:
-      type: atomic
-      atomic_ref:
-        id: T1546.004
-        test: 1              # "Persist via /etc/profile.d/"
-        args:
-          command: "id >> /tmp/.profile_d_beacon.log"
-          script_name: "99-update-check.sh"
+      type: command
+      command:
+        interpreter: bash
+        cmd: "echo 'id >> /tmp/.profile_d_beacon.log' | sudo tee /etc/profile.d/99-update-check.sh && sudo chmod +x /etc/profile.d/99-update-check.sh && echo 'profile_d_persistence_done'"
     timeout: "10s"
     on_fail: continue_no_err
 
@@ -341,12 +332,12 @@ steps:
     name: "T1070.001 — Clear bash history"
     depends_on:
       - sysinfo
-      - read_privkey        # wait for credential hunt sub-chain to settle
+      - read_privkey
       - {any: [cron_persistence, persist_bashrc, persist_profile_d, persist_suid_bash]}
     action:
-      type: atomic
-      atomic_ref:
-        id: T1070.003
-        test: 1              # "Clear Bash history (echo)"
+      type: command
+      command:
+        interpreter: bash
+        cmd: "echo '' > /root/.bash_history && history -c && echo 'history_cleared'"
     timeout: "10s"
     on_fail: continue_no_err

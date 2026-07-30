@@ -1,0 +1,10 @@
+name: Linux Network Enumeration
+steps:
+  - id: T1016_2_mrxv767j_2
+    name: T1016 — System Network Configuration Discovery
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1016
+        test: 2
+    on_fail: abort

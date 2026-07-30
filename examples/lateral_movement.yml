@@ -23,70 +23,67 @@
 #     -H 'Content-Type: application/json' \
 #     -d "{\"session_id\":\"${SESSION}\"}" | jq .
 
-id: lateral-movement-session-handoff
-name: "Lateral movement — hand off to another Sliver session"
+name: Lateral movement — hand off to another Sliver session
 description: >
-  Foothold recon on the default session, capture a peer session UUID into a
-  variable, then run further remote actions on that session via session_id.
-mitre_tactics:
-  - lateral-movement
-  - discovery
+  Foothold recon on the default session, capture a peer session UUID into a variable, then run further remote actions on
+  that session via session_id.
 tags:
   - example
   - lateral-movement
   - session_id
-
+mitre_tactics:
+  - lateral-movement
+  - discovery
 steps:
-
   - id: foothold_marker
-    name: "Identify foothold host (default session)"
+    name: Identify foothold host (default session)
     action:
       type: command
       command:
-        interpreter: sh
-        cmd: "hostname"
+        interpreter: bash
+        cmd: hostname
     output_var: foothold_host
-    timeout: "15s"
+    timeout: 15s
     on_fail: abort
-
-  # Populates {{peer_session}}. In production, swap this for a step whose stdout
-  # contains the second beacon's UUID after your lateral technique completes.
   - id: obtain_peer_session
-    name: "Resolve peer session id (lab: echo current SESSION_ID via python)"
-    depends_on: [foothold_marker]
+    name: 'Resolve peer session id (lab: echo current SESSION_ID via python)'
+    depends_on:
+      - foothold_marker
     action:
       type: python
       python:
         inline: |
-          import os
-          print(os.environ.get("SESSION_ID", "").strip())
+          print("ddfd3b70-3748-4117-9abb-b9c826d8872c")
     output_var: peer_session
-    timeout: "30s"
+    timeout: 30s
     on_fail: abort
-
   - id: peer_network_recon
-    name: "Run Ifconfig on the peer session (same UUID in lab; different host when pivoted)"
-    depends_on: [obtain_peer_session]
-    conditions:
-      - peer_session|matches: "\\S+"
-    session_id: "{{peer_session}}"
+    name: Run Ifconfig on the peer session (same UUID in lab; different host when pivoted)
+    depends_on:
+      - obtain_peer_session
     action:
       type: sliver_rpc
       sliver_rpc:
         method: Ifconfig
-    output_var: peer_ifconfig
-    timeout: "30s"
-    on_fail: continue_no_err
-
-  - id: optional_foothold_only
-    name: "Conditional step still on foothold when flag is unset (skipped in default chain)"
-    depends_on: [foothold_marker]
     conditions:
-      - foothold_host|eq: "__no_such_host__"
+      - var: peer_session
+        op: matches
+        value: \S+
+    output_var: peer_ifconfig
+    timeout: 30s
+    on_fail: continue_no_err
+  - id: optional_foothold_only
+    name: Conditional step still on foothold when flag is unset (skipped in default chain)
+    depends_on:
+      - foothold_marker
     action:
       type: command
       command:
         interpreter: sh
-        cmd: "echo should-not-run"
-    timeout: "5s"
+        cmd: echo should-not-run
+    conditions:
+      - var: foothold_host
+        op: eq
+        value: __no_such_host__
+    timeout: 5s
     on_fail: continue_no_err

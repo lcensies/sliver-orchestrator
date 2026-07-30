@@ -213,7 +213,7 @@ sync-proto:
 # Build the scenario orchestrator (requires CGO for SQLite)
 .PHONY: scenario
 scenario:
-	CGO_ENABLED=1 $(GO) build -mod=vendor -trimpath -tags go_sqlite $(LDFLAGS) -o scenario-server ./scenario/cmd/server
+	CGO_ENABLED=1 $(GO) build -mod=vendor -trimpath -tags go_sqlite $(LDFLAGS) -o scenario-server ./cmd/server
 
 # Build the scenario runner (client for scenario API; no CGO)
 .PHONY: scenario-runner

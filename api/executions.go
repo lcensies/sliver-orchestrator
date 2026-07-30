@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/bishopfox/sliver/scenario/chain"
+	commonpb "github.com/bishopfox/sliver/protobuf/commonpb"
+	sliverpb "github.com/bishopfox/sliver/protobuf/sliverpb"
 )
 
 func (s *Server) handleListExecutions(w http.ResponseWriter, r *http.Request) {
@@ -136,13 +138,14 @@ func (s *Server) handleCancelExecution(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListSessions proxies GetSessions from the Sliver gRPC API.
+// handleListSessions proxies GetSessions and probes liveness concurrently.
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.rpc.GetSessions(context.Background(), nil)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "sliver GetSessions: "+err.Error())
 		return
 	}
-	type session struct {
+	type sessionOut struct {
 		ID       string `json:"id"`
 		Name     string `json:"name"`
 		OS       string `json:"os"`
@@ -150,18 +153,59 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		PID      uint32 `json:"pid"`
 	}
-	out := make([]session, 0, len(resp.Sessions))
+	type probeResult struct {
+		s     sessionOut
+		alive bool
+	}
+	candidates := make([]sessionOut, 0)
 	for _, sess := range resp.Sessions {
-		out = append(out, session{
-			ID:       sess.ID,
-			Name:     sess.Name,
-			OS:       sess.OS,
-			Hostname: sess.Hostname,
-			Username: sess.Username,
-			PID:      uint32(sess.PID),
+		if sess.IsDead {
+			continue
+		}
+		candidates = append(candidates, sessionOut{
+			ID: sess.ID, Name: sess.Name, OS: sess.OS,
+			Hostname: sess.Hostname, Username: sess.Username, PID: uint32(sess.PID),
 		})
 	}
-	writeJSON(w, http.StatusOK, out)
+	// Probe each session concurrently with 5s timeout
+	resultCh := make(chan probeResult, len(candidates))
+	for _, c := range candidates {
+		go func(c sessionOut) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			path, arg := "/bin/sh", "-c hostname"
+			if c.OS == "windows" {
+				path, arg = "cmd.exe", "/c hostname"
+			}
+			_, probeErr := s.rpc.Execute(ctx, &sliverpb.ExecuteReq{
+				Path:    path,
+				Args:    []string{arg},
+				Output:  true,
+				Request: &commonpb.Request{SessionID: c.ID, Timeout: 5},
+			})
+			resultCh <- probeResult{s: c, alive: probeErr == nil}
+		}(c)
+	}
+	out := make([]sessionOut, 0, len(candidates))
+	for range candidates {
+		r := <-resultCh
+		if r.alive {
+			out = append(out, r.s)
+		}
+	}
+	// Deduplicate — keep highest PID per hostname+os combination
+	seen := make(map[string]sessionOut)
+	for _, s := range out {
+		key := s.OS + ":" + s.Hostname
+		if existing, ok := seen[key]; !ok || s.PID > existing.PID {
+			seen[key] = s
+		}
+	}
+	deduped := make([]sessionOut, 0, len(seen))
+	for _, s := range seen {
+		deduped = append(deduped, s)
+	}
+	writeJSON(w, http.StatusOK, deduped)
 }
 
 // ── SSE helpers ───────────────────────────────────────────────────────────────

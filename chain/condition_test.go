@@ -108,27 +108,3 @@ func TestParseSigmaCondition(t *testing.T) {
 		}
 	}
 }
-
-func TestEffectiveStepSessionID(t *testing.T) {
-	def := "default-session-uuid"
-	cases := []struct {
-		name string
-		step Step
-		vars VarMap
-		want string
-	}{
-		{"empty uses default", Step{}, VarMap{}, def},
-		{"literal override", Step{SessionID: "other-uuid"}, VarMap{}, "other-uuid"},
-		{"template from vars", Step{SessionID: "{{peer}}"}, VarMap{"peer": "b-uuid"}, "b-uuid"},
-		{"empty after substitute falls back", Step{SessionID: "{{empty_peer}}"}, VarMap{"empty_peer": ""}, def},
-		{"whitespace trimmed", Step{SessionID: "  x  "}, VarMap{}, "x"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := EffectiveStepSessionID(tc.step, def, tc.vars)
-			if got != tc.want {
-				t.Fatalf("got %q, want %q", got, tc.want)
-			}
-		})
-	}
-}

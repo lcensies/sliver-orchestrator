@@ -2,7 +2,7 @@
 #
 # Commands run on the compromised host only. This example probes reachability toward
 # another lab IP (second victim). Default compose has victim-2 commented out; expect
-# ping to fail unless you enable 172.20.0.21 or change the address.
+# ping to fail unless you enable 172.16.1.20 or change the address.
 
 id: lateral-inband-reachability
 name: Probe second host from beacon (single session)
@@ -17,7 +17,7 @@ steps:
       type: command
       command:
         interpreter: sh
-        cmd: "ping -c 1 -W 2 172.20.0.21"
+        cmd: "ping -c 1 -W 2 172.16.1.20"
     output_var: ping_out
     timeout: "15s"
     on_fail: continue_no_err

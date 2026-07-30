@@ -61,22 +61,6 @@ func Substitute(s string, vars VarMap) string {
 	return s
 }
 
-// EffectiveStepSessionID selects the Sliver session for a step.
-// If s.SessionID is empty, defaultSession is used. Otherwise the field is trimmed,
-// {{VarName}} placeholders are replaced from vars, and a non-empty result is used;
-// if substitution yields an empty string, defaultSession is used.
-func EffectiveStepSessionID(s Step, defaultSession string, vars VarMap) string {
-	raw := strings.TrimSpace(s.SessionID)
-	if raw == "" {
-		return defaultSession
-	}
-	resolved := strings.TrimSpace(Substitute(raw, vars))
-	if resolved == "" {
-		return defaultSession
-	}
-	return resolved
-}
-
 // SubstituteAction returns a shallow copy of action with all string fields substituted.
 func SubstituteAction(a Action, vars VarMap) Action {
 	if a.Command != nil {
@@ -136,11 +120,17 @@ func SubstituteAction(a Action, vars VarMap) Action {
 		rpc.Params = newParams
 		a.RPCAction = &rpc
 	}
-	if a.WaitBeacon != nil {
-		wb := *a.WaitBeacon
-		wb.Hostname = Substitute(wb.Hostname, vars)
-		wb.RemoteAddress = Substitute(wb.RemoteAddress, vars)
-		a.WaitBeacon = &wb
+	if a.InitialAccess != nil {
+		ia := *a.InitialAccess
+		ia.Target = Substitute(ia.Target, vars)
+		newCfg := make(map[string]string, len(ia.Config))
+		for k, v := range ia.Config {
+			newCfg[k] = Substitute(v, vars)
+		}
+		ia.Config = newCfg
+		ia.Wait.MatchHostname = Substitute(ia.Wait.MatchHostname, vars)
+		ia.Wait.MatchOS = Substitute(ia.Wait.MatchOS, vars)
+		a.InitialAccess = &ia
 	}
 	return a
 }

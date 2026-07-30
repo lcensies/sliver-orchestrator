@@ -1,0 +1,20 @@
+name: Probe second host from beacon (single session)
+description: From victim A, ping lab host B — classic first hop before SSH/wmi/etc.
+tags:
+  - demo
+  - linux
+  - in-band
+mitre_tactics:
+  - lateral-movement
+  - discovery
+steps:
+  - id: ping_second_host
+    name: ICMP reachability toward second lab victim
+    action:
+      type: command
+      command:
+        interpreter: sh
+        cmd: ping -c 1 -W 2 172.16.1.20
+    output_var: ping_out
+    timeout: 15s
+    on_fail: continue_no_err

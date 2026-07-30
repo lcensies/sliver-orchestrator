@@ -5,14 +5,8 @@ lab/bin/
 .vagrant/
 *.exe
 lab/bin/
-
-# AI tool files (local only)
-CLAUDE.md
-.claude/
-.cursorrules
-
-# AI tool files (local only)
-CLAUDE.md
-.claude/
-.cursorrules
+win10_custom.box
 scenario-server
+*.box
+*.log
+*.bak

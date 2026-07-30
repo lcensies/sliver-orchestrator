@@ -108,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Implant delivery — generates a Sliver beacon on demand and serves the binary
 	mux.HandleFunc("GET /api/v1/implant/linux", s.handleGetImplantLinux)
+	mux.HandleFunc("GET /api/v1/implant/windows", s.handleGetImplantWindows)
 
 	// Atomics
 	mux.HandleFunc("GET /api/v1/atomics", s.handleListAtomics)

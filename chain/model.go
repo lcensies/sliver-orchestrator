@@ -35,11 +35,11 @@ const (
 	ActionPython ActionType = "python"
 	// ActionSliverRPC dispatches a named Sliver gRPC call with JSON parameters.
 	ActionSliverRPC ActionType = "sliver_rpc"
-	// ActionWaitBeacon polls the Sliver server until a beacon matching the given
-	// filter checks in, then emits its ID as stdout. Used after a beacon-delivery
-	// step so later steps can pivot onto the freshly landed beacon via
-	// session_id: "{{captured_var}}".
-	ActionWaitBeacon ActionType = "wait_beacon"
+	// ActionInitialAccess runs a pluggable initial-access module against a declared
+	// target to obtain a fresh Sliver session. The new session's UUID is emitted as
+	// the step's stdout so it can be captured with output_var and used by later steps
+	// via session_id: "{{var}}".
+	ActionInitialAccess ActionType = "initial_access"
 )
 
 // FailPolicy controls executor behaviour when a step returns a non-zero exit code or error.
@@ -67,7 +67,30 @@ type Chain struct {
 	Description  string   `json:"description"   yaml:"description"`
 	MITRETactics []string `json:"mitre_tactics" yaml:"mitre_tactics"`
 	Tags         []string `json:"tags"          yaml:"tags"`
-	Steps        []Step   `json:"steps"         yaml:"steps"`
+	// Targets are named hosts an initial_access step can breach to obtain a Sliver
+	// session. They are looked up by name from an InitialAccessAction.Target field.
+	Targets []Target `json:"targets" yaml:"targets"`
+	Steps   []Step   `json:"steps"         yaml:"steps"`
+}
+
+// Target is a named host that an initial_access step can attack. Attrs carries
+// arbitrary module-specific key/values (e.g. a vulnerable endpoint path) that are
+// forwarded verbatim to the initial-access module.
+type Target struct {
+	Name  string            `json:"name"  yaml:"name"`
+	Host  string            `json:"host"  yaml:"host"`
+	Port  int               `json:"port"  yaml:"port"`
+	Attrs map[string]string `json:"attrs" yaml:"attrs"`
+}
+
+// TargetByName returns the target with the given name, or false if none matches.
+func (c Chain) TargetByName(name string) (Target, bool) {
+	for _, t := range c.Targets {
+		if t.Name == name {
+			return t, true
+		}
+	}
+	return Target{}, false
 }
 
 // Dep is a single entry in a Step's DependsOn list.
@@ -163,11 +186,6 @@ type Step struct {
 	Conditions []Condition `json:"conditions" yaml:"conditions"`
 	Action     Action      `json:"action"     yaml:"action"`
 
-	// SessionID optionally targets a different Sliver session than the one passed to
-	// POST .../execute. Supports {{VarName}} substitution from prior step output.
-	// Empty or omitted uses the execution default session.
-	SessionID string `json:"session_id,omitempty" yaml:"session_id,omitempty"`
-
 	// OutputVar captures the stdout of this step into a named variable that
 	// later steps can reference with {{VarName}} syntax.
 	// If OutputFilter is also set, the extracted capture group is stored instead.
@@ -181,6 +199,9 @@ type Step struct {
 
 	Timeout string     `json:"timeout" yaml:"timeout"` // e.g. "30s", "5m"
 	OnFail  FailPolicy `json:"on_fail" yaml:"on_fail"`
+	// SessionID overrides the chain-level session for this step only.
+	// Supports {{VarName}} substitution from prior step outputs.
+	SessionID string `json:"session_id" yaml:"session_id"`
 }
 
 // OutputFilter selects a specific part of stdout using a Go regex capture group.
@@ -243,7 +264,63 @@ type Action struct {
 	Probe     *ProbeAction   `json:"probe"      yaml:"probe"`
 	Python    *PythonAction  `json:"python"     yaml:"python"`
 	RPCAction *RPCAction     `json:"sliver_rpc" yaml:"sliver_rpc"`
-	WaitBeacon *WaitBeaconAction `json:"wait_beacon" yaml:"wait_beacon"`
+
+	InitialAccess *InitialAccessAction `json:"initial_access" yaml:"initial_access"`
+
+	// resolvedTarget is populated by the chain executor at dispatch time from the
+	// chain's Targets block (see InitialAccessAction.Target). It is intentionally
+	// unexported so it is never serialized; the sliver executor reads it directly.
+	resolvedTarget *Target
+}
+
+// InitialAccessAction breaches a declared target using a named module to obtain a
+// new Sliver session. Config is an arbitrary, module-specific map (all values support
+// {{VarName}} substitution) forwarded to the module as JSON.
+type InitialAccessAction struct {
+	// Target references a name in the chain's top-level targets: block.
+	Target string `json:"target" yaml:"target"`
+	// Module is the registry key of the initial-access module ("external" ships built-in).
+	Module string `json:"module" yaml:"module"`
+	// Config holds module-specific parameters (e.g. run argv, implant URL, exploit options).
+	Config map[string]string `json:"config" yaml:"config"`
+	// Wait controls how the newly spawned Sliver session is detected after the module runs.
+	Wait WaitSpec `json:"wait" yaml:"wait"`
+}
+
+// WaitSpec controls correlation of the Sliver session that appears after a successful
+// initial-access module run.
+type WaitSpec struct {
+	// Timeout bounds how long to wait for a new session (Go duration, e.g. "180s").
+	// Empty defaults to 120s.
+	Timeout string `json:"timeout" yaml:"timeout"`
+	// MatchHostname, when set, requires the new session's hostname to contain this value.
+	MatchHostname string `json:"match_hostname" yaml:"match_hostname"`
+	// MatchOS, when set, requires the new session's OS to contain this value (e.g. "linux").
+	MatchOS string `json:"match_os" yaml:"match_os"`
+}
+
+// SetResolvedTarget records the concrete target resolved from the chain's targets block.
+func (a *Action) SetResolvedTarget(t Target) { a.resolvedTarget = &t }
+
+// ResolvedTarget returns the target resolved for an initial_access action, or false
+// if none has been set.
+func (a Action) ResolvedTarget() (Target, bool) {
+	if a.resolvedTarget == nil {
+		return Target{}, false
+	}
+	return *a.resolvedTarget, true
+}
+
+// WaitTimeout parses Wait.Timeout, defaulting to 120s when empty or unparseable.
+func (w WaitSpec) WaitTimeout() time.Duration {
+	if w.Timeout == "" {
+		return 120 * time.Second
+	}
+	d, err := time.ParseDuration(w.Timeout)
+	if err != nil {
+		return 120 * time.Second
+	}
+	return d
 }
 
 // CommandAction executes a raw command string using the named interpreter.
@@ -297,30 +374,6 @@ type BinaryAction struct {
 
 	// Cleanup removes the uploaded binary from the victim after execution.
 	Cleanup bool `json:"cleanup" yaml:"cleanup"`
-
-	// Background launches the binary detached (nohup on Linux, start /B on Windows)
-	// and returns immediately instead of waiting for it to exit. Required when
-	// deploying a long-running payload such as a Sliver beacon, which never returns
-	// and would otherwise block the step until the timeout fires.
-	Background bool `json:"background" yaml:"background"`
-}
-
-// WaitBeaconAction blocks until a beacon matching the filter checks in, then
-// returns its ID as stdout (capture with output_var to pivot later steps onto it).
-//
-// Hostname / RemoteAddress are substring filters (both must match when set) and
-// support {{VarName}} substitution. When neither is set, the most recently
-// checked-in beacon is returned. Exit 0 on match, exit 1 on timeout.
-type WaitBeaconAction struct {
-	// Hostname is a case-insensitive substring match against the beacon Hostname.
-	Hostname string `json:"hostname" yaml:"hostname"`
-	// RemoteAddress is a case-insensitive substring match against the beacon's
-	// remote address (e.g. the target's IP that you deployed the beacon to).
-	RemoteAddress string `json:"remote_address" yaml:"remote_address"`
-	// Timeout is a Go duration string (default "120s") to wait for a match.
-	Timeout string `json:"timeout" yaml:"timeout"`
-	// PollInterval is a Go duration string (default "5s") between server polls.
-	PollInterval string `json:"poll_interval" yaml:"poll_interval"`
 }
 
 // RPCAction calls a Sliver RPC method by name with a free-form parameter map.
@@ -384,7 +437,7 @@ type PythonAction struct {
 //   - Sigma-style: a single key "var|op" with the comparison value, e.g. victim_os|contains: Linux
 type Condition struct {
 	// Var is the name of a previously captured output variable, or the special value "exit_code".
-	Var   string `json:"var"    yaml:"var"`
+	Var string `json:"var"    yaml:"var"`
 	// Op is the comparison operator: "eq", "neq", "contains", "matches", "gt", "lt".
 	Op    string `json:"op"     yaml:"op"`
 	Value string `json:"value"  yaml:"value"`
