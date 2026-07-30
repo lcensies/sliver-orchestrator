@@ -6,13 +6,21 @@ workstation if you want it.
 
 ```
 c2           192.168.56.5    Sliver + scenario-server   (attacker/orchestrator)
-linux_pivot  192.168.56.10   Ubuntu, dual-homed         (compromised gateway)
+linux_pivot  192.168.56.10   Ubuntu, dual-homed         (clean — no pre-installed implant)
              172.16.1.10     ── isolated "sliver-lab" intnet ──┐
 win_target   172.16.1.20     Windows 10                  (hidden target)
 ```
 
 **win_target has NO route to the C2.** That is intentional — it is what makes
 this a pivoting lab. You reach it *through* linux_pivot.
+
+**linux_pivot ships with NO pre-installed implant.** `lab/provision/victim-linux.sh`
+only installs OS dependencies now — it does not fetch or start a beacon. The only
+way to get a session on linux_pivot is to actually breach it: `setup.sh` deploys a
+deliberately-vulnerable `vulnweb` service on it (`:9090`, command injection in
+`GET /ping?host=`), and `examples/full-attack-chain-v2.yaml` opens with an
+`initial_access` step that exploits it to stage the beacon. See "Getting the first
+Linux session (initial access)" below.
 
 ---
 
@@ -88,20 +96,21 @@ curl http://192.168.56.5:8080/api/v1/health
 
 You should get a health JSON. If not, `vagrant ssh c2 -c "journalctl -u scenario-server -n 50"`.
 
-## Step 4 — Bring up linux_pivot (auto-gets an implant)
+## Step 4 — Bring up linux_pivot (clean — no implant yet, by design)
 
 ```bash
 vagrant up linux_pivot
 ```
 
-linux_pivot polls the C2, downloads the Linux beacon, installs it as a systemd
-service, and checks in. Confirm:
+linux_pivot only installs OS dependencies (curl, python3, nmap, arp-scan) — it
+does NOT fetch or start a beacon anymore. Confirm it's clean:
 
 ```bash
 curl http://192.168.56.5:8080/api/v1/sessions | jq .
 ```
 
-You should see one session (the pivot).
+You should see zero sessions. That's expected — see "Getting the first Linux
+session (initial access)" below for how to actually obtain one.
 
 ## Step 5 — Bring up win_target (no implant yet — by design)
 
@@ -110,6 +119,31 @@ vagrant up win_target
 ```
 
 It boots but does NOT call back — it can't reach the C2. That's expected.
+
+---
+
+## Getting the first Linux session (initial access)
+
+Run `./setup.sh` (or its Step 6 alone) to deploy the lab's services onto
+linux_pivot: the cosmetic honeypot on `:8080`, and — the actually-exploitable
+target — `vulnweb` on `:9090`, a deliberately-vulnerable app with an OS
+command-injection sink at `GET /ping?host=`. `lab/provision/c2-server.sh` also
+stages `lab/exploits/web_rce.py` on the c2 VM at `/opt/exploits/web_rce.py`.
+
+With that in place, breach linux_pivot with the chain instead of assuming a
+session already exists:
+
+```bash
+./examples/run.sh examples/full-attack-chain-v2.yaml http://192.168.56.5:8080/api/v1
+```
+
+The chain's first step (`breach_linux_host`, `type: initial_access`) exploits
+`vulnweb` to make linux_pivot download and run a Sliver implant served by the
+scenario API, waits for the resulting session, and binds it to
+`{{linux_session}}`. Every following step (discovery, cron/systemd persistence,
+Windows host discovery, wmiexec lateral movement, SAM/VSS credential access)
+runs with `session_id: "{{linux_session}}"` against that freshly-obtained
+session — nothing about them changed, only how the first foothold is obtained.
 
 ---
 

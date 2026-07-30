@@ -5,6 +5,8 @@
 #   3. Start sliver-server as a systemd service
 #   4. Install and start the scenario-server binary
 #   5. Copy atomics library to /opt/atomics
+#   6. Copy initial-access exploit scripts to /opt/exploits (used by the
+#      "external" initial-access module, e.g. lab/exploits/web_rce.py)
 set -euo pipefail
 
 SLIVER_VERSION="${SLIVER_VERSION:-v1.5.42}"
@@ -15,11 +17,17 @@ OPERATOR_CFG="/etc/sliver/scenario-operator.cfg"
 DB_PATH="/var/lib/scenario/scenario.db"
 ATOMICS_DIR="/opt/atomics"
 ATOMICS_SRC="${SCENARIO_ATOMICS_SRC:-/sliver-repo/atomics}"
+EXPLOITS_DIR="/opt/exploits"
+EXPLOITS_SRC="${SCENARIO_EXPLOITS_SRC:-/sliver-repo/lab/exploits}"
 
 # ── System dependencies ──────────────────────────────────────────────────────
+# python3 is required here too: initial_access "external" module steps (e.g.
+# type: initial_access, module: external, config.run: ["python3", "/opt/exploits/web_rce.py"])
+# shell out to a local child process ON THIS HOST (the scenario-server host), not
+# on the victim — the exploit script is what reaches out to the victim over HTTP.
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y --no-install-recommends curl wget ca-certificates sqlite3 libsqlite3-dev
+apt-get install -y --no-install-recommends curl wget ca-certificates sqlite3 libsqlite3-dev python3
 
 # ── Install sliver-server ────────────────────────────────────────────────────
 if [ ! -x /usr/local/bin/sliver-server ]; then
@@ -32,9 +40,12 @@ if [ ! -x /usr/local/bin/sliver-server ]; then
     echo "[provision] Downloading sliver-server ${SLIVER_VERSION}"
     ARCH=$(uname -m)
     case "${ARCH}" in
-      x86_64)  ARCH_SUFFIX="linux" ;;
+      x86_64) ARCH_SUFFIX="linux" ;;
       aarch64) ARCH_SUFFIX="linux-arm64" ;;
-      *)        echo "Unsupported arch: ${ARCH}"; exit 1 ;;
+      *)
+        echo "Unsupported arch: ${ARCH}"
+        exit 1
+        ;;
     esac
     curl -fsSL \
       "https://github.com/BishopFox/sliver/releases/download/${SLIVER_VERSION}/sliver-server_${ARCH_SUFFIX}" \
@@ -58,7 +69,7 @@ fi
 chmod 600 "${OPERATOR_CFG}"
 
 # ── Systemd: sliver-server ───────────────────────────────────────────────────
-cat > /etc/systemd/system/sliver-server.service << 'EOF'
+cat >/etc/systemd/system/sliver-server.service <<'EOF'
 [Unit]
 Description=Sliver C2 Server
 After=network-online.target
@@ -109,12 +120,22 @@ else
   echo "[provision] Warning: atomics source not found at ${ATOMICS_SRC}"
 fi
 
+# ── Initial-access exploit scripts ───────────────────────────────────────────
+mkdir -p "${EXPLOITS_DIR}"
+if [ -d "${EXPLOITS_SRC}" ]; then
+  echo "[provision] Copying initial-access exploits from ${EXPLOITS_SRC}"
+  cp -r "${EXPLOITS_SRC}/." "${EXPLOITS_DIR}/"
+  chmod +x "${EXPLOITS_DIR}"/*.py "${EXPLOITS_DIR}"/*.sh 2>/dev/null || true
+else
+  echo "[provision] Warning: exploits source not found at ${EXPLOITS_SRC}"
+fi
+
 # ── Scenario database dir ────────────────────────────────────────────────────
 mkdir -p "$(dirname "${DB_PATH}")"
 
 # ── Systemd: scenario-server ─────────────────────────────────────────────────
 if [ -x /usr/local/bin/scenario-server ]; then
-  cat > /etc/systemd/system/scenario-server.service << EOF
+  cat >/etc/systemd/system/scenario-server.service <<EOF
 [Unit]
 Description=Sliver Scenario Orchestrator
 After=sliver-server.service
@@ -152,4 +173,5 @@ echo "  C2 Server provisioned"
 echo "  Sliver gRPC:   ${C2_HOST}:31337"
 echo "  Scenario API:  http://${C2_HOST}:${SCENARIO_PORT}/api/v1/"
 echo "  Operator cfg:  ${OPERATOR_CFG}"
+echo "  Exploits dir:  ${EXPLOITS_DIR}"
 echo "═══════════════════════════════════════════════════════"

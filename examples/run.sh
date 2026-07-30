@@ -27,24 +27,27 @@ fi
 
 # ── Health check ──────────────────────────────────────────────────────────────
 echo "[run] Checking scenario API at ${API}..."
-if ! curl -sf "${API}/health" > /dev/null; then
+if ! curl -sf "${API}/health" >/dev/null; then
   echo "[run] ERROR: scenario API is not reachable at ${API}"
   echo "[run] Start the lab first:  docker compose -f lab/docker-compose.yml up --build -d"
   exit 1
 fi
 
-# ── Find a session ─────────────────────────────────────────────────────────────
+# ── Find a session (optional) ───────────────────────────────────────────────────
+# A pre-existing session is NOT required: chains that start with an
+# "initial_access" step (see examples/full-attack-chain-v2.yaml) obtain their
+# own session by exploiting a declared target. When one is found we still pass
+# it along as the default session for steps that don't set their own session_id.
 echo "[run] Fetching sessions..."
 SESSION=$(curl -sf "${API}/sessions" | jq -r '.[0].id // empty')
 
 if [ -z "${SESSION}" ]; then
-  echo "[run] ERROR: No active Sliver sessions found."
-  echo "[run] Victim beacon may still be connecting (check: docker compose -f lab/docker-compose.yml logs victim-1)"
-  exit 1
+  echo "[run] No active Sliver sessions found — proceeding without one."
+  echo "[run] (OK if the chain begins with an 'initial_access' step that obtains its own session.)"
+else
+  SESSION_NAME=$(curl -sf "${API}/sessions" | jq -r '.[0].name // "unknown"')
+  echo "[run] Using session: ${SESSION} (${SESSION_NAME})"
 fi
-
-SESSION_NAME=$(curl -sf "${API}/sessions" | jq -r '.[0].name // "unknown"')
-echo "[run] Using session: ${SESSION} (${SESSION_NAME})"
 
 # ── Upload chain ───────────────────────────────────────────────────────────────
 echo "[run] Loading chain from ${CHAIN_FILE}..."

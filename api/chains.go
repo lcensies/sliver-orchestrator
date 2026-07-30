@@ -138,14 +138,18 @@ func (s *Server) handleExecuteChain(w http.ResponseWriter, r *http.Request) {
 		SessionID string `json:"session_id"`
 		DryRun    bool   `json:"dry_run"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-		return
+	// An empty body is allowed: initial_access chains obtain their own session, so
+	// no pre-existing session_id is required. readJSON tolerates an empty body.
+	if r.ContentLength != 0 {
+		if err := readJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
 	}
-	if req.SessionID == "" {
-		writeError(w, http.StatusBadRequest, "session_id is required")
-		return
-	}
+	// session_id is optional. When empty, steps without an explicit session_id have
+	// no default target and must rely on an earlier initial_access step (via
+	// session_id: "{{var}}"). Steps that need a session but have none will fail
+	// individually, which surfaces clearly in the step logs.
 
 	var ch chain.Chain
 	if err := json.Unmarshal([]byte(rec.Data), &ch); err != nil {
