@@ -9,6 +9,11 @@ export default defineConfig({
     headless: true,
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
+    // Opt-in: run against a system-provided browser (e.g. on NixOS where the
+    // Playwright-downloaded chromium can't run). Unset → default managed browser.
+    launchOptions: process.env.PW_CHROME
+      ? { executablePath: process.env.PW_CHROME, args: ['--no-sandbox'] }
+      : undefined,
   },
   reporter: [['list'], ['html', { open: 'never' }]],
 });

@@ -58,6 +58,12 @@ func (s *Store) UpdateChain(r ChainRecord) error {
 	return s.db.Save(&r).Error
 }
 
+// UpsertChain inserts r, or updates it if a record with the same ID exists.
+// Used by startup scenario discovery to seed file-defined scenarios idempotently.
+func (s *Store) UpsertChain(r ChainRecord) error {
+	return s.db.Save(&r).Error
+}
+
 func (s *Store) DeleteChain(id string) error {
 	return s.db.Delete(&ChainRecord{}, "id = ?", id).Error
 }

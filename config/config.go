@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,6 +19,20 @@ type Config struct {
 
 	// AtomicsDir is the directory containing technique YAML files.
 	AtomicsDir string `yaml:"atomics_dir"`
+
+	// ScenarioDirs are directories scanned at startup for scenario definitions to
+	// seed into the store. Each entry may be a *.yaml/*.yml file or a folder
+	// containing a scenario YAML plus bundled resources. See chain.DiscoverScenarios.
+	ScenarioDirs []string `yaml:"scenario_dirs"`
+
+	// ScenarioWatch, when > 0, re-scans ScenarioDirs every N seconds and upserts
+	// changed definitions without a restart (live pickup). 0 disables watching.
+	ScenarioWatch int `yaml:"scenario_watch"`
+
+	// ScenarioWriteDir, when set, persists chains created/updated via the API back to
+	// disk as <dir>/<id>.yaml. The value "last" resolves to the last ScenarioDirs
+	// entry (typically the writable workspace). Empty disables write-back.
+	ScenarioWriteDir string `yaml:"scenario_write_dir"`
 
 	// DBPath is the SQLite database file path.
 	DBPath string `yaml:"db_path"`
@@ -39,11 +54,12 @@ type Config struct {
 // Defaults returns a Config populated with sensible defaults.
 func Defaults() *Config {
 	return &Config{
-		ListenAddr:  ":8080",
-		DBPath:      "./scenario.db",
-		AtomicsDir:  "./atomics",
-		AllowOrigin: "*",
-		LogLevel:    "info",
+		ListenAddr:   ":8080",
+		DBPath:       "./scenario.db",
+		AtomicsDir:   "./atomics",
+		ScenarioDirs: []string{"examples", "sliver-orchestrator-workspace/scenarios"},
+		AllowOrigin:  "*",
+		LogLevel:     "info",
 	}
 }
 
@@ -76,6 +92,17 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("SCENARIO_ATOMICS_DIR"); v != "" {
 		cfg.AtomicsDir = v
 	}
+	if v := os.Getenv("SCENARIO_DIRS"); v != "" {
+		cfg.ScenarioDirs = splitList(v)
+	}
+	if v := os.Getenv("SCENARIO_WATCH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.ScenarioWatch = n
+		}
+	}
+	if v := os.Getenv("SCENARIO_WRITE_DIR"); v != "" {
+		cfg.ScenarioWriteDir = v
+	}
 	if v := os.Getenv("SCENARIO_DB_PATH"); v != "" {
 		cfg.DBPath = v
 	}
@@ -93,6 +120,18 @@ func applyEnv(cfg *Config) {
 	} else if v := os.Getenv("C2_HOST"); v != "" {
 		cfg.C2Host = v
 	}
+}
+
+// splitList parses a SCENARIO_DIRS value separated by ':' or ',' (e.g.
+// "/opt/scenario-examples:/opt/workspace/scenarios"), dropping empty entries.
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.FieldsFunc(v, func(r rune) bool { return r == ':' || r == ',' }) {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // Validate checks that required fields are present.

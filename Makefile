@@ -1,168 +1,110 @@
+# Makefile — Sliver Scenario Orchestrator
 #
-# Makefile for Sliver
+# Docker-first. The whole E2E range comes up with one command:
 #
-
-GO ?= go
-ARTIFACT_SUFFIX ?= 
-ENV =
-TAGS ?= -tags go_sqlite
-CGO_ENABLED = 0
-
-ifneq (,$(findstring cgo_sqlite,$(TAGS)))
-	CGO_ENABLED = 1
-endif
-
+#   make up          # C2 (Sliver + scenario-server) + web frontend
+#   make up-victim   # + one Linux victim container
+#   make lab         # extended multi-victim lab (adds vulnweb initial-access target)
+#   make down        # stop everything, remove volumes
+#   make logs        # follow C2 logs
 #
-# Prerequisites 
-#
-# https://stackoverflow.com/questions/5618615/check-if-a-program-exists-from-a-makefile
-EXECUTABLES = uname sed git date cut $(GO)
-K := $(foreach exec,$(EXECUTABLES),\
-        $(if $(shell which $(exec)),some string,$(error "No $(exec) in PATH")))
+# Standalone Go builds (for local dev without Docker) are under "Standalone builds".
+# Run `make help` for the full target list.
 
-#
-# Build Information
-#
-GO_MAJOR_VERSION = $(shell $(GO) version | cut -c 14- | cut -d' ' -f1 | cut -d'.' -f1)
-GO_MINOR_VERSION = $(shell $(GO) version | cut -c 14- | cut -d' ' -f1 | cut -d'.' -f2)
-MIN_SUPPORTED_GO_MAJOR_VERSION = 1
-MIN_SUPPORTED_GO_MINOR_VERSION = 25
-GO_VERSION_VALIDATION_ERR_MSG = Golang version is not supported, please update to at least $(MIN_SUPPORTED_GO_MAJOR_VERSION).$(MIN_SUPPORTED_GO_MINOR_VERSION)
+GO      ?= go
+COMPOSE ?= docker compose
 
-SLIVER_PUBLIC_KEY ?= RWTZPg959v3b7tLG7VzKHRB1/QT+d3c71Uzetfa44qAoX5rH7mGoQTTR
-ARMORY_PUBLIC_KEY ?= RWSBpxpRWDrD7Fe+VvRE3c2VEDC2NK80rlNCj+BX0gz44Xw07r6KQD9L
-ARMORY_REPO_URL ?= https://api.github.com/repos/sliverarmory/armory/releases
-CLIENT_ASSETS_PKG = github.com/bishopfox/sliver/client/assets
-SLIVER_UPDATE_PKG = github.com/bishopfox/sliver/client/command/update
+# Root compose = full E2E stack (C2 + frontend; victim behind the `victim` profile).
+# lab/docker-compose.yml = extended lab (2nd victim + vulnweb initial-access target).
+LAB_COMPOSE ?= lab/docker-compose.yml
 
-LDFLAGS = -ldflags "-s -w \
-	-X $(SLIVER_UPDATE_PKG).SliverPublicKey=$(SLIVER_PUBLIC_KEY) \
-	-X $(CLIENT_ASSETS_PKG).DefaultArmoryPublicKey=$(ARMORY_PUBLIC_KEY) \
-	-X $(CLIENT_ASSETS_PKG).DefaultArmoryRepoURL=$(ARMORY_REPO_URL)"
+# `make run` params: chain file (required), API url + session id (optional).
+CHAIN   ?=
+API     ?= http://127.0.0.1:18080/api/v1
+SESSION ?=
 
-# Debug builds shouldn't be stripped (-s -w flags)
-LDFLAGS_DEBUG = -ldflags "-X $(CLIENT_ASSETS_PKG).DefaultArmoryPublicKey=$(ARMORY_PUBLIC_KEY) \
-	-X $(CLIENT_ASSETS_PKG).DefaultArmoryRepoURL=$(ARMORY_REPO_URL)"
-
-SED_INPLACE := sed -i
-STATIC_TARGET := linux
-
-UNAME_S := $(shell uname -s)
-UNAME_P := $(shell uname -p)
-
-# Programs required for generating protobuf/grpc files
-PB_COMPILERS = protoc protoc-gen-go protoc-gen-go-grpc
-ifeq ($(MAKECMDGOALS), pb)
-	K := $(foreach exec,$(PB_COMPILERS),\
-			$(if $(shell which $(exec)),some string,$(error "Missing protobuf util $(exec) in PATH")))
-endif
-
-# *** Darwin ***
-ifeq ($(UNAME_S),Darwin)
-	SED_INPLACE := sed -i ''
-	STATIC_TARGET := macos
-endif
-
-# If no target is specified, determine GOARCH
-ifeq ($(UNAME_P),arm)
-	ifeq ($(MAKECMDGOALS), )
-		ifeq ($(origin GOARCH), undefined)
-			ENV += GOARCH=arm64
-		endif
-	endif
-endif
-
-ifeq ($(MAKECMDGOALS), linux)
-	# Redefine LDFLAGS to add the static part
-	LDFLAGS = -ldflags "-s -w \
-		-extldflags '-static' \
-		-X $(CLIENT_ASSETS_PKG).DefaultArmoryPublicKey=$(ARMORY_PUBLIC_KEY) \
-		-X $(CLIENT_ASSETS_PKG).DefaultArmoryRepoURL=$(ARMORY_REPO_URL)"
-endif
-
-#
-# Targets
-#
-.PHONY: default
-default: clean validate-go-version
-	env -u GOOS -u GOARCH $(MAKE) GOOS= GOARCH= .downloaded_assets
-	$(ENV) $(if $(GOOS),GOOS=$(GOOS)) $(if $(GOARCH),GOARCH=$(GOARCH)) CGO_ENABLED=$(CGO_ENABLED) $(GO) build -mod=vendor -trimpath $(TAGS),server $(LDFLAGS) -o sliver-server$(ARTIFACT_SUFFIX) ./server
-	$(ENV) $(if $(GOOS),GOOS=$(GOOS)) $(if $(GOARCH),GOARCH=$(GOARCH)) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client$(ARTIFACT_SUFFIX) ./client
-
-# Allows you to build a CGO-free client for any target e.g. `GOOS=windows GOARCH=arm64 make client`
-# NOTE: WireGuard is not supported on all platforms, but most 64-bit GOOS/GOARCH combinations should work.
-.PHONY: client
-client: clean .downloaded_assets validate-go-version
-	$(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client ./client
-
-.PHONY: macos-amd64
-macos-amd64: clean .downloaded_assets validate-go-version
-	GOOS=darwin GOARCH=amd64 $(ENV) CGO_ENABLED=$(CGO_ENABLED) $(GO) build -mod=vendor -trimpath $(TAGS),server $(LDFLAGS) -o sliver-server$(ARTIFACT_SUFFIX) ./server
-	GOOS=darwin GOARCH=amd64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client$(ARTIFACT_SUFFIX) ./client
-
-.PHONY: macos-arm64
-macos-arm64: clean .downloaded_assets validate-go-version
-	GOOS=darwin GOARCH=arm64 $(ENV) CGO_ENABLED=$(CGO_ENABLED) $(GO) build -mod=vendor -trimpath $(TAGS),server $(LDFLAGS) -o sliver-server$(ARTIFACT_SUFFIX) ./server
-	GOOS=darwin GOARCH=arm64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client$(ARTIFACT_SUFFIX) ./client
-
-.PHONY: linux-amd64
-linux-amd64: clean .downloaded_assets validate-go-version
-	GOOS=linux GOARCH=amd64 $(ENV) CGO_ENABLED=$(CGO_ENABLED) $(GO) build -mod=vendor -trimpath $(TAGS),server $(LDFLAGS) -o sliver-server$(ARTIFACT_SUFFIX) ./server
-	GOOS=linux GOARCH=amd64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client$(ARTIFACT_SUFFIX) ./client
-
-.PHONY: linux-arm64
-linux-arm64: clean .downloaded_assets validate-go-version
-	GOOS=linux GOARCH=arm64 $(ENV) CGO_ENABLED=$(CGO_ENABLED) $(GO) build -mod=vendor -trimpath $(TAGS),server $(LDFLAGS) -o sliver-server$(ARTIFACT_SUFFIX) ./server
-	GOOS=linux GOARCH=arm64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client$(ARTIFACT_SUFFIX) ./client
-
-.PHONY: windows-amd64
-windows-amd64: clean .downloaded_assets validate-go-version
-	GOOS=windows GOARCH=amd64 $(ENV) CGO_ENABLED=$(CGO_ENABLED) $(GO) build -mod=vendor -trimpath $(TAGS),server $(LDFLAGS) -o sliver-server$(ARTIFACT_SUFFIX).exe ./server
-	GOOS=windows GOARCH=amd64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client$(ARTIFACT_SUFFIX).exe ./client
-
-.PHONY: clients
-clients: clean .downloaded_assets validate-go-version
-	GOOS=darwin GOARCH=amd64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client_macos-amd64$(ARTIFACT_SUFFIX) ./client
-	GOOS=darwin GOARCH=arm64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client_macos-arm64$(ARTIFACT_SUFFIX) ./client
-	GOOS=linux GOARCH=386 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client_linux-386$(ARTIFACT_SUFFIX) ./client
-	GOOS=linux GOARCH=amd64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client_linux-amd64$(ARTIFACT_SUFFIX) ./client
-	GOOS=linux GOARCH=arm64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client_linux-arm64$(ARTIFACT_SUFFIX) ./client
-	GOOS=windows GOARCH=386 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client_windows-386$(ARTIFACT_SUFFIX).exe ./client
-	GOOS=windows GOARCH=amd64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client_windows-amd64$(ARTIFACT_SUFFIX).exe ./client
-	GOOS=windows GOARCH=arm64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client_windows-arm64$(ARTIFACT_SUFFIX).exe ./client
-	GOOS=freebsd GOARCH=amd64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client_freebsd-amd64$(ARTIFACT_SUFFIX) ./client
-	GOOS=freebsd GOARCH=arm64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),client $(LDFLAGS) -o sliver-client_freebsd-arm64$(ARTIFACT_SUFFIX) ./client
-
-.PHONY: servers
-servers: clean .downloaded_assets validate-go-version
-	GOOS=windows GOARCH=amd64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),server $(LDFLAGS) -o sliver-server_windows-amd64$(ARTIFACT_SUFFIX).exe ./server
-	GOOS=windows GOARCH=arm64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),server $(LDFLAGS) -o sliver-server_windows-arm64$(ARTIFACT_SUFFIX).exe ./server
-	GOOS=linux GOARCH=amd64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),server $(LDFLAGS) -o sliver-server_linux-amd64$(ARTIFACT_SUFFIX) ./server
-	GOOS=linux GOARCH=arm64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),server $(LDFLAGS) -o sliver-server_linux-arm64$(ARTIFACT_SUFFIX) ./server
-	GOOS=darwin GOARCH=arm64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),server $(LDFLAGS) -o sliver-server_darwin-arm64$(ARTIFACT_SUFFIX) ./server
-	GOOS=darwin GOARCH=amd64 $(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor -trimpath $(TAGS),server $(LDFLAGS) -o sliver-server_darwin-amd64$(ARTIFACT_SUFFIX) ./server
-
-# ── Proto sync ────────────────────────────────────────────────────────────────
-# Fetch proto files from the BishopFox/sliver GitHub repo at the same version
-# as the server binary in Dockerfile, then regenerate the pb.go files in vendor.
-#
-# Usage:
-#   make sync-proto
-#   make sync-proto SLIVER_VERSION=v1.7.3   # override version
-#
-# Requires: protoc, and Go (protoc-gen-go / protoc-gen-go-grpc auto-installed)
-
+# Sliver version the C2 image installs — also what `sync-proto` pins vendored
+# protobufs to, so the client protos match the running sliver-server.
 SLIVER_VERSION ?= $(shell grep -oP 'SLIVER_VERSION=\K[^ ]+' Dockerfile | head -1)
 PROTO_BASE_URL  = https://raw.githubusercontent.com/BishopFox/sliver/$(SLIVER_VERSION)/protobuf
 PROTO_VENDOR    = vendor/github.com/bishopfox/sliver/protobuf
 PROTO_TMP       = /tmp/sliver-proto-$(SLIVER_VERSION)
-
 PROTO_FILES = \
 	commonpb/common.proto \
 	sliverpb/sliver.proto \
 	clientpb/client.proto \
 	rpcpb/services.proto
 
+.DEFAULT_GOAL := help
+
+## help: list available targets
+.PHONY: help
+help:
+	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## //' | \
+		awk -F': ' '{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+
+# ── Docker (primary workflow) ─────────────────────────────────────────────────
+
+## up: build + start the E2E stack (C2 + frontend) in the background
+.PHONY: up
+up:
+	$(COMPOSE) up --build -d
+
+## up-web: `up` plus the vulnerable web target (web initial-access demo)
+.PHONY: up-web
+up-web:
+	$(COMPOSE) --profile web up --build -d
+
+## up-victim: `up` plus a self-beaconing Linux victim container
+.PHONY: up-victim
+up-victim:
+	$(COMPOSE) --profile victim up --build -d
+
+## lab: start the extended multi-victim lab (adds vulnweb initial-access target)
+.PHONY: lab
+lab:
+	$(COMPOSE) -f $(LAB_COMPOSE) up --build -d
+
+## run: load + execute a chain (CHAIN=<chain.yaml> [API=<url>] [SESSION=<id>])
+.PHONY: run
+run:
+	@test -n "$(CHAIN)" || { echo "usage: make run CHAIN=examples/initial-access-web.yaml [API=<url>] [SESSION=<id>]"; exit 1; }
+	./examples/run.sh "$(CHAIN)" "$(API)" "$(SESSION)"
+
+## logs: follow C2 container logs
+.PHONY: logs
+logs:
+	$(COMPOSE) logs -f c2
+
+## ps: show stack status
+.PHONY: ps
+ps:
+	$(COMPOSE) ps
+
+## build: build all images without starting them
+.PHONY: build
+build:
+	$(COMPOSE) build
+
+## down: stop the stack and remove volumes (root + lab compose)
+.PHONY: down
+down:
+	-$(COMPOSE) --profile web --profile victim down -v
+	-$(COMPOSE) -f $(LAB_COMPOSE) down -v
+
+# ── Standalone builds (local dev, no Docker) ──────────────────────────────────
+
+## scenario-server: build ./scenario-server standalone (needs CGO + libsqlite3-dev)
+.PHONY: scenario-server scenario
+scenario-server scenario:
+	CGO_ENABLED=1 $(GO) build -mod=vendor -trimpath -tags go_sqlite -ldflags "-s -w" -o scenario-server ./cmd/server
+
+## frontend-build: build only the frontend image
+.PHONY: frontend-build
+frontend-build:
+	$(COMPOSE) build frontend
+
+## sync-proto: re-vendor Sliver protobufs to match SLIVER_VERSION (needs protoc)
 .PHONY: sync-proto
 sync-proto:
 	@echo "==> Syncing Sliver protobuf $(SLIVER_VERSION)"
@@ -207,56 +149,19 @@ sync-proto:
 	cp -v $(PROTO_TMP)/sliverpb/sliver.proto  $(PROTO_VENDOR)/sliverpb/; \
 	cp -v $(PROTO_TMP)/clientpb/client.proto  $(PROTO_VENDOR)/clientpb/; \
 	cp -v $(PROTO_TMP)/rpcpb/services.proto   $(PROTO_VENDOR)/rpcpb/; \
+	echo "==> Fetching version-specific companion sliverpb/constants.go..."; \
+	curl -fsSL $(PROTO_BASE_URL)/sliverpb/constants.go -o $(PROTO_VENDOR)/sliverpb/constants.go || { echo "ERROR: failed to fetch constants.go"; exit 1; }; \
 	rm -rf $(PROTO_TMP); \
-	echo "==> Done. Vendor protos updated for $(SLIVER_VERSION)"
+	echo "==> Done. Vendor protos updated for $(SLIVER_VERSION)."; \
+	echo "    NOTE: if the generated code needs a newer Go, bump the sliver module's"; \
+	echo "    'go' line in vendor/modules.txt (currently go 1.23)."
 
-# Build the scenario orchestrator (requires CGO for SQLite)
-.PHONY: scenario
-scenario:
-	CGO_ENABLED=1 $(GO) build -mod=vendor -trimpath -tags go_sqlite $(LDFLAGS) -o scenario-server ./scenario/cmd/server
+## test: run Go unit + integration tests
+.PHONY: test
+test:
+	$(GO) test -mod=vendor -tags go_sqlite ./...
 
-# Build the scenario runner (client for scenario API; no CGO)
-.PHONY: scenario-runner
-scenario-runner:
-	cd cmd/scenario-runner && $(GO) build -mod=vendor -trimpath -o ../../scenario-runner .
-
-.PHONY: pb
-pb:
-	protoc -I protobuf/ protobuf/commonpb/common.proto --go_out=paths=source_relative:protobuf/
-	protoc -I protobuf/ protobuf/sliverpb/sliver.proto --go_out=paths=source_relative:protobuf/
-	protoc -I protobuf/ protobuf/clientpb/client.proto --go_out=paths=source_relative:protobuf/
-	protoc -I protobuf/ protobuf/dnspb/dns.proto --go_out=paths=source_relative:protobuf/
-	protoc -I protobuf/ protobuf/rpcpb/services.proto --go_out=paths=source_relative:protobuf/ --go-grpc_out=protobuf/ --go-grpc_opt=paths=source_relative 
-
-.PHONY: debug
-debug: clean
-	$(ENV) CGO_ENABLED=$(CGO_ENABLED) $(GO) build -mod=vendor $(TAGS),server $(LDFLAGS_DEBUG) -o sliver-server$(ARTIFACT_SUFFIX) ./server
-	$(ENV) CGO_ENABLED=0 $(GO) build -mod=vendor $(TAGS),client $(LDFLAGS_DEBUG) -o sliver-client$(ARTIFACT_SUFFIX) ./client
-
-validate-go-version:
-	@if [ $(GO_MAJOR_VERSION) -gt $(MIN_SUPPORTED_GO_MAJOR_VERSION) ]; then \
-		exit 0 ;\
-	elif [ $(GO_MAJOR_VERSION) -lt $(MIN_SUPPORTED_GO_MAJOR_VERSION) ]; then \
-		echo '$(GO_VERSION_VALIDATION_ERR_MSG)';\
-		exit 1; \
-	elif [ $(GO_MINOR_VERSION) -lt $(MIN_SUPPORTED_GO_MINOR_VERSION) ] ; then \
-		echo '$(GO_VERSION_VALIDATION_ERR_MSG)';\
-		exit 1; \
-	fi
-
-.PHONY: clean-all
-clean-all: clean
-	rm -rf ./server/assets/fs/darwin/amd64
-	rm -rf ./server/assets/fs/darwin/arm64
-	rm -rf ./server/assets/fs/windows/amd64
-	rm -rf ./server/assets/fs/linux/amd64
-	rm -f ./server/assets/fs/*.zip
-	rm -f ./.downloaded_assets
-
+## clean: remove built binaries
 .PHONY: clean
 clean:
-	rm -f sliver-client sliver-client_* sliver-server sliver-server_* sliver-*.exe scenario-server scenario-runner
-
-.downloaded_assets:
-	$(ENV) $(GO) run -mod=vendor ./util/cmd/assets
-	touch ./.downloaded_assets
+	rm -f scenario-server scenario-runner
