@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -30,6 +31,7 @@ func main() {
 		dbPath      = flag.String("db", "", "Path to SQLite database file")
 		listen      = flag.String("listen", "", "HTTP listen address (default :8080)")
 		allowOrigin = flag.String("allow-origin", "", "CORS Allow-Origin header value")
+		scenarios   = flag.String("scenarios", "", "Comma/colon-separated dirs to discover scenarios from (overrides default)")
 	)
 	flag.Parse()
 
@@ -54,6 +56,14 @@ func main() {
 	}
 	if *allowOrigin != "" {
 		cfg.AllowOrigin = *allowOrigin
+	}
+	if *scenarios != "" {
+		cfg.ScenarioDirs = nil
+		for _, p := range strings.FieldsFunc(*scenarios, func(r rune) bool { return r == ':' || r == ',' }) {
+			if p = strings.TrimSpace(p); p != "" {
+				cfg.ScenarioDirs = append(cfg.ScenarioDirs, p)
+			}
+		}
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -81,6 +91,22 @@ func main() {
 	}
 	log.Printf("Database: %s", cfg.DBPath)
 
+	// ── Scenario discovery ────────────────────────────────────────────────────
+	// Scan the configured dirs for scenario definitions (files or bundle folders)
+	// and upsert them into the store so they appear in the API / UI. Files are the
+	// source of truth: changed ids are refreshed from disk. With SCENARIO_WATCH>0 a
+	// background poller keeps picking up on-disk edits without a restart.
+	if len(cfg.ScenarioDirs) > 0 {
+		seen := map[string]string{}
+		n := seedScenarios(st, cfg.ScenarioDirs, seen)
+		log.Printf("Discovered %d scenarios from %v", n, cfg.ScenarioDirs)
+		if cfg.ScenarioWatch > 0 {
+			interval := time.Duration(cfg.ScenarioWatch) * time.Second
+			log.Printf("Watching scenario dirs every %s for changes", interval)
+			go watchScenarios(st, cfg.ScenarioDirs, interval, seen)
+		}
+	}
+
 	// ── Sliver gRPC connection ──────────────────────────────────────────────
 	operatorCfg, err := slvr.LoadConfig(cfg.SliverConfig)
 	if err != nil {
@@ -97,6 +123,23 @@ func main() {
 
 	// ── HTTP server ─────────────────────────────────────────────────────────
 	srv := api.NewServer(st, lib, rpc, cfg.SliverConfig, cfg.C2Host, cfg.AllowOrigin)
+
+	// Optional write-back: persist API-created/updated chains to disk. "last" targets
+	// the last (typically writable) scenario dir; anything else is used verbatim.
+	if wd := cfg.ScenarioWriteDir; wd != "" {
+		if wd == "last" {
+			if len(cfg.ScenarioDirs) == 0 {
+				log.Printf("WARNING: scenario_write_dir=last but no scenario dirs configured; write-back disabled")
+				wd = ""
+			} else {
+				wd = cfg.ScenarioDirs[len(cfg.ScenarioDirs)-1]
+			}
+		}
+		if wd != "" {
+			srv.SetScenarioWriteDir(wd)
+			log.Printf("Scenario write-back enabled → %s", wd)
+		}
+	}
 	httpSrv := &http.Server{
 		Addr:         cfg.ListenAddr,
 		Handler:      srv.Handler(),

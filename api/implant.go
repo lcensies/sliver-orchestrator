@@ -104,10 +104,11 @@ func (s *Server) handleGetImplantLinux(w http.ResponseWriter, r *http.Request) {
 				GOARCH:   arch,
 				Format:   clientpb.OutputFormat_EXECUTABLE,
 				IsBeacon: false,
-				// NB: no HTTPC2ConfigName — the vendored proto (Sliver ~v1.5, paired
-				// with sliver-server v1.7.3) has no named HTTP C2 profiles; generation
-				// uses the server's default HTTP C2 config. The C2 URL below is what
-				// actually points the implant at this server.
+				// sliver-server v1.7.3 requires an existing HTTP C2 profile by name;
+				// an empty name fails Generate with "record not found". "default" is
+				// the profile seeded at first unpack. The C2 URL below points the
+				// implant at this server. (Keep vendored protos in sync via `make sync-proto`.)
+				HTTPC2ConfigName: "default",
 				C2: []*clientpb.ImplantC2{
 					{Priority: 0, URL: c2URL},
 				},

@@ -4,60 +4,51 @@ A service wrapper on top of Sliver's gRPC API that supports building and executi
 
 All commands in this README are run from the **repo root** (`sliver-orchestrator/`).
 
-## Quick Start
+## Features
 
-### 1. Prepare `sliver-orchestrator-workspace`
+- **Attack chains as DAGs** — multi-stage scenarios in one YAML; steps forward output to later steps and gate on conditions (`eq`/`contains`/`matches`/`gt`/`lt`).
+- **Atomic Red Team library** — techniques loaded from ART-layout YAMLs and executed over Sliver sessions.
+- **Initial access** — a chain can *obtain* its first session via pluggable modules: `external` (any exploit script) and `metasploit` (msfconsole, with brute-force). See [Initial access](#initial-access-targets--initial_access-action).
+- **Lateral movement / multi-beacon** — per-step `session_id` and output-variable session binding.
+- **Weaponizer** — on-demand implant delivery (`GET /api/v1/implant/{linux,windows}`), built and cached per (arch, c2, port).
+- **REST API + SSE** — build, execute, and stream executions live.
+- **Web UI** — React frontend for sessions, chains, and live execution streams.
+- **Dockerized E2E lab** — `make up` brings up C2 + frontend; victims run as containers or VMs.
 
-The Docker lab mounts atomics from `../sliver-orchestrator-workspace/atomics` relative to `lab/docker-compose.yml`, which resolves to a sibling directory of the repo:
+## Quick Start (Docker)
 
-```
-sliver-orchestrator/          ← repo root (run all commands here)
-sliver-orchestrator-workspace/
-└── atomics/                  ← ART technique YAMLs mounted into Docker
-```
+Everything is dockerized — you need only **Docker >= 24 with Compose v2**. `scenario-server` is compiled inside the C2 image, so no host Go toolchain is required.
 
-The workspace is tracked as a git submodule and atomics are already included. Initialize and pull it with:
+### 1. Get the workspace (atomics)
+
+The C2 mounts atomics from the `sliver-orchestrator-workspace` git submodule (atomics already included):
 
 ```bash
 git submodule update --init --remote
 ```
 
-If you need to refresh atomics manually or don't use the submodule:
+### 2. Start the stack
 
 ```bash
-mkdir -p ../sliver-orchestrator-workspace/atomics
-chmod +x atomic/fetch.sh
-./atomic/fetch.sh ../sliver-orchestrator-workspace/atomics
+make up            # C2 (Sliver + scenario-server) + web frontend
+make logs          # follow C2 logs (first run unpacks Sliver assets, ~1-2 min)
+
+make up-victim     # optional: also start one Linux victim container
 ```
 
-### 2. Build the scenario-runner
-
-```bash
-make scenario-runner
-```
-
-This produces a `scenario-runner` binary in the repo root.
-
-### 3. Start the lab
-
-Run from the repo root:
-
-```bash
-docker compose -f lab/docker-compose.yml up --build -d
-docker compose -f lab/docker-compose.yml logs -f c2
-```
-
-The compose stack exposes:
+Exposed on the host:
+- `http://127.0.0.1:8080` — Web UI
 - `http://127.0.0.1:18080` — Scenario REST API
-- `127.0.0.1:31337` — Sliver gRPC
+- `127.0.0.1:31337` — Sliver gRPC (for `sliver-client`)
+- `:80` — Sliver HTTP C2 (beacon callback; published on `0.0.0.0` for VMs)
 
-### 4. Run the example chain
+### 3. Run an example chain
 
 ```bash
-./scenario-runner -chain examples/linux-full-chain.yaml -graph -online-print
+./examples/run.sh examples/linux-full-chain.yaml
 ```
 
-### 5. Check the API
+### 4. Check the API
 
 ```bash
 curl http://127.0.0.1:18080/api/v1/health
@@ -65,43 +56,115 @@ curl http://127.0.0.1:18080/api/v1/atomics | jq .
 curl http://127.0.0.1:18080/api/v1/sessions | jq .
 ```
 
-## Lab Setup
+Stop everything (and drop volumes) with `make down`. Run `make help` for all targets.
 
-### Docker
+### Refreshing atomics manually
 
-What starts automatically:
-
-1. The `c2` container starts `sliver-server`, generates an operator config, and runs `scenario-server`.
-2. The victim polls `GET /api/v1/health` until the API is ready, then downloads the Linux implant from `GET /api/v1/implant/linux`.
-3. On the first implant request, `scenario-server` starts a Sliver HTTP listener on port `80` and builds a Linux beacon.
-4. When the victim checks in, it appears in `GET /api/v1/sessions`.
-
-Useful commands (run from repo root):
+If you don't use the submodule, populate `sliver-orchestrator-workspace/atomics` yourself:
 
 ```bash
-docker compose -f lab/docker-compose.yml up --build -d
-docker compose -f lab/docker-compose.yml logs -f c2
-docker compose -f lab/docker-compose.yml logs -f victim-1
-docker compose -f lab/docker-compose.yml down -v
+chmod +x atomic/fetch.sh
+./atomic/fetch.sh sliver-orchestrator-workspace/atomics
 ```
+
+## Lab Setup
+
+### Topology
+
+The root `docker-compose.yml` is the E2E stack. `make up` starts the C2 + web
+frontend; victims are optional and picked with a profile — `make up-web` adds the
+vulnerable web target (initial-access demo), `make up-victim` adds a self-beaconing
+Linux victim. Inter-container URLs use the C2's **static IP** (not its name), so the
+stack works even where container DNS is unavailable (e.g. rootless podman).
+
+```
+  browser ── host :8080 ──▶ frontend (nginx SPA)  172.20.0.40
+                                 │  proxies /api/v1  ─────────┐
+                                 ▼                            ▼
+  operator ─ host :18080 REST ─┐                    ┌───────────────────────────┐
+             host :31337 gRPC ─┼──────────────────▶ │  c2   172.20.0.10          │
+  victims  ─ host :80  C2 HTTP ┘                    │  sliver-server + scenario  │
+                                                    └─────────────┬─────────────┘
+        initial_access exploit ───┐  beacons call back to C2_HOST │
+                     ┌────────────┴──────────────┬───────────────┴────────────┐
+                     ▼                           ▼                             ▼
+              victim-web  172.20.0.30     victim  172.20.0.20            external VM
+              (vulnerable target)         (self-beaconing)             C2_HOST=<host IP>
+```
+
+Two victim paths:
+
+- **`make up-web`** — the vulnerable `victim-web` target does **not** beacon on its
+  own. A chain's `initial_access` step exploits its command-injection endpoint to
+  stage a Sliver beacon and obtain a session (see the demo below).
+- **`make up-victim`** — the `victim` container polls `GET /api/v1/health`, downloads
+  the Linux implant from `GET /api/v1/implant/linux`, and checks in by itself. On the
+  first implant request the C2 starts a Sliver HTTP listener on `:80` and builds the
+  beacon (~1-2 min). The session then appears in `GET /api/v1/sessions`.
+
+Useful commands (from repo root):
+
+```bash
+make up            # C2 + frontend
+make up-web        # + vulnerable web target (initial-access demo)
+make up-victim     # + self-beaconing Linux victim
+make logs          # follow C2 logs
+make ps            # status
+make down          # stop + remove volumes
+```
+
+### Web initial-access demo
+
+With `make up-web` running, breach the web target and capture the session in one chain:
+
+```bash
+./examples/run.sh examples/initial-access-web.yaml
+```
+
+The `breach` step exploits `victim-web`'s `GET /ping?host=` command injection to make
+it download and run the Sliver beacon, waits for the new session, binds it to
+`{{web1_session}}`, then the `recon` step runs `id && hostname` on it.
+
+### Reaching VMs (not just containers)
+
+Container victims reach the C2 by its compose IP. **Off-host victims — VMs and bare
+metal — attach over the host network**, so the C2's REST, gRPC and Sliver HTTP C2
+ports are published on `0.0.0.0`:
+
+1. `cp .env.example .env` and set `C2_HOST` to an address the VM can route to (the
+   Docker host's LAN IP). Implants are then built to beacon to that address.
+2. Bring the stack up. VMs fetch an implant from `http://<C2_HOST>:18080/api/v1/implant/{linux,windows}`
+   and beacon back to `<C2_HOST>:80`.
+
+If host port `80` is taken, set `SLIVER_C2_PORT` in `.env` and fetch implants with
+`?port=<that port>`. The bundled **`Vagrantfile`** provisions a Windows + Linux
+pivoting VM lab that points at `C2_HOST` out of the box — see
+[`lab/vm-setup/SETUP.md`](lab/vm-setup/SETUP.md).
+
+### Extended lab (multiple victims + vulnweb)
+
+`lab/docker-compose.yml` is a fuller lab on its own network: a second Linux victim
+plus `victim-web`, a deliberately-vulnerable app used as the initial-access target
+in [`examples/initial-access-web.yaml`](examples/initial-access-web.yaml). Start it
+with `make lab`.
 
 ## Atomics Library
 
 Technique definitions use the [Atomic Red Team](https://github.com/redcanaryco/atomic-red-team) layout: `T1059.001/T1059.001.yaml`. The loader accepts both `.yaml` and `.yml` and scans subdirectories under the atomics root.
 
-The Docker lab reads atomics from `../sliver-orchestrator-workspace/atomics` (sibling of the repo). The workspace submodule includes atomics already — initialize it with `git submodule update --init --remote`.
+The Docker lab reads atomics from the in-repo `sliver-orchestrator-workspace/atomics` git submodule. It includes atomics already — initialize it with `git submodule update --init --remote`.
 
 To refresh atomics manually:
 
 ```bash
 chmod +x atomic/fetch.sh
-./atomic/fetch.sh ../sliver-orchestrator-workspace/atomics
+./atomic/fetch.sh sliver-orchestrator-workspace/atomics
 ```
 
 Optional cleanup after download:
 
 ```bash
-./atomic/fetch.sh ../sliver-orchestrator-workspace/atomics --clean
+./atomic/fetch.sh sliver-orchestrator-workspace/atomics --clean
 ```
 
 `atomic/fetch.sh` downloads the GitHub archive and copies only the upstream `atomics/` tree. It does not install `Invoke-AtomicRedTeam` or PowerShell helper scripts.
@@ -115,14 +178,63 @@ goart --technique T1059.001 --index 0 --atomics-path ./sliver-orchestrator-works
 
 ## Building
 
-From the repo root:
+The Docker image builds `scenario-server` for you (`make up`). You only need a
+standalone build for local development outside Docker:
 
 ```bash
-make scenario-runner   # build scenario-runner (output: ./scenario-runner)
-make scenario          # build scenario-server (output: ./scenario-server)
+make scenario-server   # build ./scenario-server (alias: make scenario)
 ```
 
-`scenario-server` requires CGO (for SQLite). The Docker lab builds it automatically — you only need `make scenario-server` for local development outside Docker.
+`scenario-server` requires CGO for SQLite — install a C toolchain first, e.g.
+`sudo apt install build-essential libsqlite3-dev`.
+
+Chains are executed with [`examples/run.sh`](examples/run.sh) (load → execute →
+stream) or directly against the REST API.
+
+## Scenario Discovery
+
+At startup the server scans the configured **scenario directories** and seeds every
+definition it finds into the store, so they appear in `GET /api/v1/chains` and the
+web UI without a manual upload. Defaults:
+
+- `examples/` (this repo)
+- `sliver-orchestrator-workspace/scenarios/` (the workspace submodule)
+
+In Docker both are mounted and wired via `SCENARIO_DIRS=/opt/scenario-examples:/opt/workspace/scenarios`
+(see `docker-compose.yml`). Override the list anywhere with the `--scenarios` flag or
+`SCENARIO_DIRS` env (`:` or `,` separated). Add more dirs freely.
+
+A **scenario** in a directory is either:
+
+- a `*.yaml` / `*.yml` file, or
+- a **folder** bundling the definition plus its resources (scripts, wordlists,
+  fixtures). The definition is `scenario.yaml`/`chain.yaml` if present, otherwise the
+  single `*.yaml`/`*.yml` in the folder.
+
+Inside a bundle, reference co-located resources with the `{{scenario_dir}}` token —
+it is rewritten to the bundle's absolute path at load time:
+
+```
+scenarios/web-breach/
+├── scenario.yaml        # run: '["python3", "{{scenario_dir}}/web_rce.py"]'
+└── web_rce.py           # bundled exploit, shipped with the scenario
+```
+
+Files are the source of truth: a definition's `id` (explicit, else derived from the
+file/folder name) is **upserted** on start, so edits on disk are picked up.
+Definitions with an invalid step graph are skipped with a warning.
+
+**Live pickup.** Set `SCENARIO_WATCH=<seconds>` (the compose lab uses `5`) to re-scan the
+dirs on an interval and upsert changed definitions **without a restart** — only entries
+whose content actually changed are rewritten, so unrelated chains are left alone.
+
+**Write-back.** By default the DB is the only home for chains created/edited in the UI.
+Set `SCENARIO_WRITE_DIR` to also persist them to disk as `<dir>/<id>.yaml` — use `last`
+for the last scenario dir (the compose lab uses the writable workspace; `examples` is
+mounted read-only). Combined with watching, GUI edits round-trip to files and back.
+
+> Deletions are intentionally not mirrored in either direction: removing a file does not
+> drop the chain from the store, and deleting a chain in the UI does not remove its file.
 
 ## Chain YAML Schema
 
@@ -618,6 +730,9 @@ Priority: CLI flags > `SCENARIO_*` env vars > YAML file > defaults.
 |---|---|---|---|
 | `--config` | `SCENARIO_SLIVER_CONFIG` | required | Sliver operator `.cfg` file path |
 | `--atomics` | `SCENARIO_ATOMICS_DIR` | `./atomics` | Technique YAML directory |
+| `--scenarios` | `SCENARIO_DIRS` | `examples`, `sliver-orchestrator-workspace/scenarios` | Dirs scanned at startup for scenarios (`:`/`,`-separated) |
+| *(n/a)* | `SCENARIO_WATCH` | `0` | Seconds between re-scans for live pickup (`0` = off) |
+| *(n/a)* | `SCENARIO_WRITE_DIR` | *(empty)* | Persist API-created/updated chains to `<dir>/<id>.yaml`; `last` = last scenario dir |
 | `--db` | `SCENARIO_DB_PATH` | `./scenario.db` | SQLite database path |
 | `--listen` | `SCENARIO_LISTEN` | `:8080` | HTTP listen address |
 | `--allow-origin` | `SCENARIO_ALLOW_ORIGIN` | `*` | CORS Allow-Origin |
@@ -628,6 +743,7 @@ Optional YAML config file:
 ```yaml
 sliver_config: /etc/sliver/scenario-operator.cfg
 atomics_dir:   /opt/atomics
+scenario_dirs: [/opt/scenario-examples, /opt/workspace/scenarios]
 db_path:       /var/lib/scenario/scenario.db
 listen:        :8080
 allow_origin:  "*"
@@ -641,24 +757,34 @@ Repo root = this directory (scenario/ in sliver monorepo, or the repo root when 
 
 ```
 .                    Go packages (cmd, api, chain, atomic, sliver, store, config)
-├── cmd/server/      HTTP server entrypoint (main.go)
+├── cmd/server/      scenario-server entrypoint (main.go)
 ├── config/          Config loading (YAML + env)
 ├── chain/           Chain model, DAG resolver, condition evaluator, executor
 ├── atomic/          Fetch helper for upstream Atomic Red Team YAMLs
 │   └── fetch.sh     Downloads upstream atomics into a local directory
+├── initialaccess/   Initial-access modules (external, metasploit) + registry
+├── weaponizer/      Implant build/delivery helpers
 ├── sliver/          Sliver gRPC client + step executor
 ├── store/           SQLite persistence (GORM)
 └── api/             REST API handlers (Go 1.22 ServeMux)
 
-sliver-orchestrator-workspace/atomics/   Mounted Atomic Red Team YAML library
+docker-compose.yml   E2E stack: C2 + frontend (+ victim via `--profile victim`)
+.env.example         C2_HOST / port knobs for VM (off-host) victims
+Dockerfile           C2 image (multi-stage: builds scenario-server + runtime)
+Vagrantfile          Windows + Linux pivoting VM lab (see lab/vm-setup/SETUP.md)
+
+frontend/            React web UI (nginx SPA; proxies /api/v1 → c2), git submodule
+
+sliver-orchestrator-workspace/atomics/   Mounted Atomic Red Team YAML library (submodule)
 └── T*/T*.yaml       Upstream technique definitions used by the Docker lab
 
 lab/
-├── docker-compose.yml   Docker lab (c2 + 2 linux victims)
-├── Dockerfile.victim    Victim container image
+├── docker-compose.yml   Extended lab (2nd victim + vulnweb initial-access target)
+├── Dockerfile.victim    Linux victim container image
+├── Dockerfile.victim-web  Deliberately-vulnerable web target
+├── exploits/        Initial-access module scripts (mounted at /opt/exploits)
+├── vm-setup/        VM lab setup guide
 └── provision/       Shell + PowerShell provisioning scripts
-
-Dockerfile          C2 container image (multi-stage: scenario-server + runtime), at repo root
 
 examples/            Ready-to-use chain YAML files
 ├── t1082-basic-discovery.yaml        Single atomic test (beginner)
@@ -718,8 +844,8 @@ Demonstrates:
 ### Running examples with `run.sh`
 
 ```bash
-# Start the lab first (if not already running)
-docker-compose -f lab/docker-compose.yml up --build -d
+# Start the stack first (if not already running)
+make up-victim
 
 # Example 1 — basic atomic test
 ./examples/run.sh examples/t1082-basic-discovery.yaml

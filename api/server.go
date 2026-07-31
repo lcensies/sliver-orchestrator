@@ -74,7 +74,14 @@ type Server struct {
 	c2Host  string // C2 host used as beacon callback address
 	exec    *ExecManager
 	cors    string
+
+	// scenarioWriteDir, when set, persists chains created/updated via the API to
+	// <dir>/<id>.yaml so on-disk scenario definitions stay in sync with the UI.
+	scenarioWriteDir string
 }
+
+// SetScenarioWriteDir enables write-back of API-created/updated chains to dir.
+func (s *Server) SetScenarioWriteDir(dir string) { s.scenarioWriteDir = dir }
 
 // NewServer creates a Server.
 // cfgPath is the Sliver operator .cfg file path; it is injected into python step

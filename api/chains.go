@@ -3,7 +3,10 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,6 +16,30 @@ import (
 	"github.com/bishopfox/sliver/scenario/chain"
 	"github.com/bishopfox/sliver/scenario/store"
 )
+
+// persistScenario best-effort writes ch to <scenarioWriteDir>/<id>.yaml when
+// write-back is enabled. Failures are logged, not fatal — the DB is source of record
+// for the request; the file is a convenience mirror the discovery watcher re-reads.
+func (s *Server) persistScenario(ch chain.Chain) {
+	if s.scenarioWriteDir == "" {
+		return
+	}
+	if err := os.MkdirAll(s.scenarioWriteDir, 0o755); err != nil {
+		log.Printf("WARNING: scenario write-back mkdir %q: %v", s.scenarioWriteDir, err)
+		return
+	}
+	data, err := yaml.Marshal(ch)
+	if err != nil {
+		log.Printf("WARNING: scenario write-back marshal %q: %v", ch.ID, err)
+		return
+	}
+	path := filepath.Join(s.scenarioWriteDir, ch.ID+".yaml")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		log.Printf("WARNING: scenario write-back %q: %v", path, err)
+		return
+	}
+	log.Printf("Scenario %q written to %s", ch.ID, path)
+}
 
 func (s *Server) handleListChains(w http.ResponseWriter, r *http.Request) {
 	records, err := s.store.ListChains()
@@ -68,6 +95,7 @@ func (s *Server) handleCreateChain(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, storeErr.Error())
 		return
 	}
+	s.persistScenario(ch)
 	writeJSON(w, http.StatusCreated, ch)
 }
 
@@ -113,6 +141,7 @@ func (s *Server) handleUpdateChain(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.persistScenario(ch)
 	writeJSON(w, http.StatusOK, ch)
 }
 

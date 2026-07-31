@@ -1,5 +1,5 @@
 # github.com/bishopfox/sliver v1.15.16
-## explicit; go 1.17
+## explicit; go 1.23
 github.com/bishopfox/sliver/protobuf/clientpb
 github.com/bishopfox/sliver/protobuf/commonpb
 github.com/bishopfox/sliver/protobuf/rpcpb

@@ -1,4 +1,6 @@
 scenario-runner
+scenario-server
+.env
 .pyc
 tests/e2e/__pycache__/
 tests/ui/node_modules
