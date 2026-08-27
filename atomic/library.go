@@ -94,6 +94,25 @@ func (lib *Library) LoadFile(path string) error {
 	if t.ID == "" {
 		return fmt.Errorf("%s: attack_technique field is empty", path)
 	}
+	// Derive the technique's Platforms from the union of its tests'
+	// SupportedPlatforms when the YAML carries no technique-level list. ART
+	// files declare supported_platforms PER TEST and (almost) never at the
+	// technique level, so without this Technique.Platforms is empty for nearly
+	// every technique and Filter's platform matching drops all of them — a
+	// `?platform=linux` query returned 2 of 343 techniques instead of ~145.
+	if len(t.Platforms) == 0 {
+		seen := make(map[string]bool)
+		for _, test := range t.Tests {
+			for _, p := range test.SupportedPlatforms {
+				key := strings.ToLower(strings.TrimSpace(p))
+				if key == "" || seen[key] {
+					continue
+				}
+				seen[key] = true
+				t.Platforms = append(t.Platforms, key)
+			}
+		}
+	}
 	lib.techniques[t.ID] = &t
 	return nil
 }

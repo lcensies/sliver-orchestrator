@@ -74,7 +74,10 @@ func (s *Server) handleGetImplantLinux(w http.ResponseWriter, r *http.Request) {
 	}
 	globalImplantCache.mu.Unlock()
 
-	if err := s.ensureHTTPListener(c2Host, port); err != nil {
+	// NOTE: c2Host is the ADVERTISED callback address baked into the implant
+	// (a victim-routable address such as the libvirt bridge IP). It is
+	// deliberately NOT the listener's bind address — see ensureHTTPListener.
+	if err := s.ensureHTTPListener(port); err != nil {
 		log.Printf("[implant] ensureHTTPListener: %v", err)
 		writeError(w, http.StatusInternalServerError, "could not start HTTP listener: "+err.Error())
 		return
@@ -157,9 +160,17 @@ func (s *Server) findMatchingBuild(arch, c2URL string) (string, error) {
 	return "", nil
 }
 
-// ensureHTTPListener starts a Sliver HTTP listener on c2Host:port if one is
-// not already present.
-func (s *Server) ensureHTTPListener(host string, port uint32) error {
+// ensureHTTPListener starts a Sliver HTTP listener on *port* if one is not
+// already present.
+//
+// The listener binds ALL interfaces (Host left empty). It must NOT be bound to
+// the address implants call back to: that address is chosen for the VICTIM's
+// routing table (e.g. the libvirt bridge IP 192.168.122.1) and does not exist
+// inside this container, so binding it made StartHTTPListener report success
+// while nothing actually listened on the port — every implant check-in was
+// refused and no session ever registered. The published container port is
+// what carries victim traffic in.
+func (s *Server) ensureHTTPListener(port uint32) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -178,13 +189,12 @@ func (s *Server) ensureHTTPListener(host string, port uint32) error {
 	defer cancel2()
 
 	_, err = s.rpc.StartHTTPListener(ctx2, &clientpb.HTTPListenerReq{
-		Host: host,
 		Port: port,
 	})
 	if err != nil {
 		return fmt.Errorf("StartHTTPListener: %w", err)
 	}
-	log.Printf("[implant] Started HTTP listener on %s:%d", host, port)
+	log.Printf("[implant] Started HTTP listener on :%d (all interfaces)", port)
 	return nil
 }
 
